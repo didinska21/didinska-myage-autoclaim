@@ -3,6 +3,13 @@
 Script Python untuk auto-claim My Age (@MyAgeApp) banyak akun sekaligus,
 jalan langsung di VPS — tanpa browser, tanpa klik UI.
 
+> **v2 (13 Nov 2026):** total putaran kini dihitung dari hadiah klaim yang
+> benar-benar dibayar server (v1 salah membaca field `age` di respons
+> session — itu statistik lain, bukan saldo), hadiah dibedakan AGE vs GRAM
+> (spin bisa bayar GRAM), status "sudah diambil hari ini" tampil sebagai
+> info (bukan error), dan setiap putaran ditutup **tabel ringkasan
+> multi-akun**. Terverifikasi jalan end-to-end di VPS (5 akun, 13 Nov 2026).
+
 Per putaran, per akun, script mengerjakan persis jalur API resmi app-nya:
 
 1. Ambil **initData segar** dari WebView bot @MyAgeApp (lewat sesi Telegram akun itu sendiri)

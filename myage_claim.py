@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS.
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v2)
 
 Cara kerja:
 - Per akun: buka sesi Telegram (Telethon, StringSession per label di
@@ -14,6 +14,15 @@ Cara kerja:
   share/*, usdt, vip, bingx. Tidak invite, tidak ubah nama/bio
   (tag/bio di sini hanya klaim hadiah yang server verifikasi sendiri),
   tidak connect wallet, tidak bayar/sign apa pun.
+
+Yang baru di v2:
+- Total putaran dihitung dari HADIAH KLAIM yang benar-benar dibayar server
+  (bukan selisih saldo — field "age" di respons session ternyata statistik
+  lain, bukan saldo AGE; v1 salah membaca field itu).
+- Hadiah dibedakan AGE vs GRAM (spin bisa membayar GRAM).
+- Status 429 "Already taken/paid today" ditampilkan sebagai "sudah
+  diambil", bukan seperti error.
+- Tampilan multi-akun: header per akun + TABEL RINGKASAN di akhir putaran.
 
 Pemakaian:
   python3 myage_claim.py --once                 # satu putaran semua akun
@@ -63,11 +72,19 @@ def log(label, msg):
         pass
 
 
+def banner(msg):
+    log("=", msg)
+
+
 def _loads(raw):
     try:
         return json.loads(raw)
     except Exception:
         return {"raw": raw[:500]}
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 def find_number(obj, names, depth=0):
@@ -77,7 +94,7 @@ def find_number(obj, names, depth=0):
     if isinstance(obj, dict):
         for n in names:
             v = obj.get(n)
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
+            if _num(v):
                 return v
         for v in obj.values():
             r = find_number(v, names, depth + 1)
@@ -91,10 +108,129 @@ def find_number(obj, names, depth=0):
     return None
 
 
-def balances(state):
-    age = find_number(state, ("age", "AGE", "age_balance", "balance_age"))
-    gram = find_number(state, ("gram", "GRAM", "gram_balance", "balance_gram"))
-    return age, gram
+def find_string(obj, names, depth=0):
+    if depth > 4:
+        return None
+    if isinstance(obj, dict):
+        for n in names:
+            v = obj.get(n)
+            if isinstance(v, str) and v:
+                return v
+        for v in obj.values():
+            r = find_string(v, names, depth + 1)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = find_string(v, names, depth + 1)
+            if r is not None:
+                return r
+    return None
+
+
+def resp_message(js):
+    if isinstance(js, dict):
+        return str(js.get("error") or js.get("message") or
+                   js.get("reason") or js.get("detail") or "")
+    return ""
+
+
+def parse_reward(js):
+    """Ekstrak hadiah dari respons klaim -> (age, gram).
+
+    Respons klaim terbukti memuat angka hadiah (amount/claimed/reward/...);
+    mata uangnya AGE kecuali respons menyebut GRAM (spin bisa bayar GRAM).
+    """
+    amt = find_number(js, ("amount", "claimed", "reward", "earned",
+                           "bonus", "value", "prize"))
+    if amt is not None:
+        cur = find_string(js, ("currency", "unit", "token", "denom",
+                               "asset"))
+        if cur and "gram" in cur.lower():
+            return None, amt
+        if cur and "age" in cur.lower():
+            return amt, None
+        # Tanpa label mata uang: tebak dari kunci telanjang yang ikut ada.
+        g = find_number(js, ("gram",))
+        a = find_number(js, ("age",))
+        if g is not None and a is None and amt == g:
+            return None, amt
+        return amt, None
+    # Tidak ada amount generik: mungkin pasangan age/gram langsung.
+    return find_number(js, ("age",)), find_number(js, ("gram",))
+
+
+def classify(st, js):
+    """-> (status, pesan_singkat). status: ok|already|warn|error"""
+    msg = resp_message(js)
+    low = msg.lower()
+    if st == 200:
+        return "ok", msg
+    if "already" in low or "taken today" in low or "paid today" in low:
+        return "already", msg
+    if st == 429:
+        return "already", msg or "sudah diambil hari ini"
+    if st == 400:
+        return "warn", msg
+    if st == 0:
+        return "error", msg or "jaringan/API tidak menjawab"
+    return "error", msg
+
+
+AGE_KEYS = ("age", "age_balance", "balance_age", "age_amount")
+GRAM_KEYS = ("gram", "gram_balance", "balance_gram", "gram_amount")
+
+
+def find_balances(state):
+    """Cari pasangan saldo (age, gram) di respons session.
+
+    v1 salah ambil: kunci "age" pertama di JSON ternyata statistik lain
+    (50 / 37,5 / 25 — bukan saldo). v2 mengumpulkan semua dict yang memuat
+    kunci age DAN gram sekaligus, lalu memilih yang paling mungkin saldo:
+    induk bernama balance/wallet diutamakan, lalu nilai age terbesar.
+    Mengembalikan (age|None, gram|None).
+    """
+    cands = []
+
+    def walk(obj, depth, parent):
+        if depth > 5:
+            return
+        if isinstance(obj, dict):
+            age = gram = None
+            for k, v in obj.items():
+                if not _num(v):
+                    continue
+                lk = str(k).lower()
+                if lk in AGE_KEYS:
+                    age = v
+                elif lk in GRAM_KEYS:
+                    gram = v
+            if age is not None and gram is not None:
+                score = 0
+                if "balance" in parent or "wallet" in parent:
+                    score += 10
+                cands.append((score, age, gram))
+            for k, v in obj.items():
+                walk(v, depth + 1, str(k).lower())
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v, depth, parent)
+
+    walk(state, 0, "")
+    if cands:
+        cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
+        return cands[0][1], cands[0][2]
+    return None, find_number(state, GRAM_KEYS)
+
+
+def fmt(v):
+    """Format angka gaya ID: 113.116 / 2.500 / 0,065 / — untuk None."""
+    if v is None:
+        return "—"
+    if isinstance(v, float) and v != int(v):
+        s = f"{v:.3f}".rstrip("0").rstrip(".")
+        return s.replace(".", ",")
+    return f"{int(round(v)):,}".replace(",", ".")
 
 
 class Api:
@@ -140,18 +276,34 @@ class Api:
         return self._req("GET", path)
 
 
-def claim_simple(api, label, path, note):
+ICON = {"ok": "✅", "already": "⏭", "warn": "⚠️", "error": "❌"}
+
+
+def do_claim(api, label, path, note, res):
+    """Satu klaim sederhana; catat hasil ke res[note] dan ke total akun."""
     st, js = api.post(path, {})
-    amt = find_number(js, ("amount", "claimed", "reward", "earned", "bonus",
-                           "value"))
-    if st == 200:
-        log(label, f"{note}: OK" + (f" +{amt}" if amt is not None else ""))
+    status, msg = classify(st, js)
+    age = gram = None
+    if status == "ok":
+        age, gram = parse_reward(js)
+    res["items"][note] = (status, age, gram)
+    if age:
+        res["age"] += age
+    if gram:
+        res["gram"] += gram
+    if status == "ok":
+        parts = []
+        if age:
+            parts.append(f"+{fmt(age)} AGE")
+        if gram:
+            parts.append(f"+{fmt(gram)} GRAM")
+        log(label, f"  ✅ {note:<14} {' · '.join(parts) or 'OK'}")
+    elif status == "already":
+        log(label, f"  ⏭ {note:<14} sudah diambil hari ini")
+    elif status == "warn":
+        log(label, f"  ⚠️ {note:<14} {msg[:90]}")
     else:
-        err = ""
-        if isinstance(js, dict):
-            err = str(js.get("error") or js.get("message") or
-                      js.get("reason") or "")[:120]
-        log(label, f"{note}: status {st} {err}".rstrip())
+        log(label, f"  ❌ {note:<14} status {st} {msg[:90]}".rstrip())
     return st, js
 
 
@@ -230,36 +382,39 @@ async def tg_task_actions(client, label, tasks):
                "channel" in t["type"]:
                 await client(JoinChannelRequest(
                     await client.get_input_entity(name)))
-                log(label, f"task: join @{name}")
+                log(label, f"  · task: join @{name}")
             elif "bot" in t["type"] or "start" in t["type"] or \
                     "register" in t["type"] or "quest" in t["type"]:
                 await client.send_message(name, "/start")
-                log(label, f"task: START @{name}")
+                log(label, f"  · task: START @{name}")
             await asyncio.sleep(random.uniform(1, 2.5))
         except Exception as e:
-            log(label, f"task @{name}: gagal ({type(e).__name__})")
+            log(label, f"  · task @{name}: gagal ({type(e).__name__})")
 
 
 async def run_claims(label, api, client, inspect):
+    res = {"label": label, "user": "", "items": {}, "age": 0.0,
+           "gram": 0.0, "saldo_age": None, "saldo_gram": None,
+           "skipped": ""}
     st, state = api.post("session", {})
     if st != 200:
-        log(label, f"session gagal: status {st} — akun dilewati putaran ini")
-        return
-    age0, gram0 = balances(state)
-    log(label, f"saldo awal: AGE={age0} GRAM={gram0}")
+        log(label, f"  ❌ session gagal: status {st} — akun dilewati")
+        res["skipped"] = f"session status {st}"
+        return res
+    age0, gram0 = find_balances(state)
+    res["saldo_age"], res["saldo_gram"] = age0, gram0
     if inspect:
         dump(label, "session", state)
+    if age0 is not None or gram0 is not None:
+        log(label, f"  saldo awal: AGE={fmt(age0)} GRAM={fmt(gram0)}")
 
-    claim_simple(api, label, "vault", "Vault")
-    time.sleep(random.uniform(1, 2))
-    claim_simple(api, label, "daily", "Daily reward")
-    time.sleep(random.uniform(1, 2))
-    claim_simple(api, label, "spin", "Spin reguler")
-    time.sleep(random.uniform(1, 2))
-    claim_simple(api, label, "tag", "Name tag harian")
-    time.sleep(random.uniform(1, 2))
-    claim_simple(api, label, "bio", "Link bio harian")
+    for path, note in (("vault", "Vault"), ("daily", "Daily"),
+                       ("spin", "Spin"), ("tag", "Name tag"),
+                       ("bio", "Link bio")):
+        do_claim(api, label, path, note, res)
+        time.sleep(random.uniform(1, 2))
 
+    extra_age = extra_gram = 0.0
     st, ach = api.get("achievements")
     if inspect:
         dump(label, "achievements", ach)
@@ -269,9 +424,19 @@ async def run_claims(label, api, client, inspect):
         for k in sorted(keys):
             time.sleep(random.uniform(0.7, 1.5))
             st2, js2 = api.post("achievements", {"key": k})
-            amt = find_number(js2, ("amount", "claimed", "reward", "earned"))
-            log(label, f"Achievement {k}: status {st2}" +
-                (f" +{amt}" if amt is not None else ""))
+            status, msg = classify(st2, js2)
+            if status == "ok":
+                a, g = parse_reward(js2)
+                if a:
+                    extra_age += a
+                if g:
+                    extra_gram += g
+                log(label, f"  ✅ Achievement {k}" +
+                    (f" +{fmt(a)} AGE" if a else "") +
+                    (f" +{fmt(g)} GRAM" if g else ""))
+            else:
+                log(label, f"  {ICON[status]} Achievement {k}: "
+                           f"{msg[:60]}")
 
     st, tasks = api.get("tasks")
     if inspect:
@@ -287,16 +452,32 @@ async def run_claims(label, api, client, inspect):
         for t in found:
             if t["key"] and t["ready"] is True and t["claimed"] is not True:
                 st2, js2 = api.post("tasks", {"key": t["key"]})
-                log(label, f"Task {t['key']}: claim status {st2}")
+                status, msg = classify(st2, js2)
+                if status == "ok":
+                    a, g = parse_reward(js2)
+                    if a:
+                        extra_age += a
+                    if g:
+                        extra_gram += g
+                    log(label, f"  ✅ Task {t['key']}" +
+                        (f" +{fmt(a)} AGE" if a else "") +
+                        (f" +{fmt(g)} GRAM" if g else ""))
+                else:
+                    log(label, f"  {ICON[status]} Task {t['key']}: "
+                               f"{msg[:60]}")
+    if extra_age or extra_gram:
+        res["items"]["Lain"] = ("ok", extra_age or None,
+                                extra_gram or None)
+        res["age"] += extra_age
+        res["gram"] += extra_gram
 
     st, state2 = api.post("session", {})
     if st == 200:
-        age1, gram1 = balances(state2)
-        delta = None
-        if isinstance(age0, (int, float)) and isinstance(age1, (int, float)):
-            delta = age1 - age0
-        log(label, f"saldo akhir: AGE={age1} GRAM={gram1}" +
-            (f" (total putaran +{delta} AGE)" if delta is not None else ""))
+        age1, gram1 = find_balances(state2)
+        log(label, f"  saldo akhir: AGE={fmt(age1)} GRAM={fmt(gram1)}")
+    log(label, f"  Subtotal: +{fmt(res['age'])} AGE · "
+               f"+{fmt(res['gram'])} GRAM")
+    return res
 
 
 def dump(label, name, obj):
@@ -313,6 +494,9 @@ async def process_account(label, args):
     sess_path = os.path.join(SESS_DIR, f"{label}.session")
     init_path = os.path.join(INIT_DIR, f"{label}.txt")
     client = None
+    res = {"label": label, "user": "", "items": {}, "age": 0.0,
+           "gram": 0.0, "saldo_age": None, "saldo_gram": None,
+           "skipped": ""}
     try:
         if os.path.exists(sess_path):
             from telethon import TelegramClient
@@ -326,10 +510,12 @@ async def process_account(label, args):
             if not await client.is_user_authorized():
                 log(label, "SESI MATI — login ulang: "
                            f"python3 login.py {label}")
+                res["skipped"] = "sesi mati"
                 await client.disconnect()
-                return
+                return res
             me = await client.get_me()
-            log(label, f"login OK @{me.username} — ambil initData segar")
+            res["user"] = "@" + (me.username or "?")
+            log(label, f"── {res['user']} ── login OK, ambil initData segar")
             init_data = await get_init_data(client)
         elif os.path.exists(init_path):
             with open(init_path) as f:
@@ -338,17 +524,65 @@ async def process_account(label, args):
         else:
             log(label, "tidak ada sesi/initdata — dilewati "
                        f"(login dulu: python3 login.py {label})")
-            return
+            res["skipped"] = "belum login"
+            return res
         api = Api(init_data)
-        await run_claims(label, api, client, args.inspect)
+        r = await run_claims(label, api, client, args.inspect)
+        r["user"] = res["user"]
+        return r
     except Exception as e:
         log(label, f"ERROR {type(e).__name__}: {str(e)[:160]}")
+        res["skipped"] = f"error {type(e).__name__}"
+        return res
     finally:
         if client is not None:
             try:
                 await client.disconnect()
             except Exception:
                 pass
+
+
+def cell(item):
+    if item is None:
+        return "—"
+    status, age, gram = item
+    if status == "ok":
+        parts = []
+        if age:
+            parts.append(f"+{fmt(age)}")
+        if gram:
+            parts.append(f"+{fmt(gram)}g")
+        return " ".join(parts) or "OK"
+    return {"already": "⏭", "warn": "⚠️", "error": "❌"}.get(status, "?")
+
+
+def print_summary(results):
+    if not results:
+        return
+    cols = ["Vault", "Daily", "Spin", "Name tag", "Link bio", "Lain"]
+    hdr = (f"{'Akun':<8}{'User':<16}" +
+           "".join(f"{c:>9}" for c in cols) +
+           f"{'AGE':>10}{'GRAM':>9}")
+    banner("═" * len(hdr))
+    banner("RINGKASAN PUTARAN")
+    banner(hdr)
+    banner("─" * len(hdr))
+    tot_age = tot_gram = 0.0
+    for r in results:
+        if r["skipped"]:
+            banner(f"{r['label']:<8}{r['user'] or '—':<16}"
+                   f" dilewati ({r['skipped']})")
+            continue
+        row = (f"{r['label']:<8}{(r['user'] or '—'):<16}" +
+               "".join(f"{cell(r['items'].get(c)):>9}" for c in cols) +
+               f"{'+' + fmt(r['age']):>10}{'+' + fmt(r['gram']):>9}")
+        banner(row)
+        tot_age += r["age"]
+        tot_gram += r["gram"]
+    banner("─" * len(hdr))
+    banner(f"{'TOTAL':<24}{'':>{9 * len(cols)}}"
+           f"{'+' + fmt(tot_age):>10}{'+' + fmt(tot_gram):>9}")
+    banner("═" * len(hdr))
 
 
 def list_labels(only=None):
@@ -371,10 +605,15 @@ async def one_round(args):
     if not labels:
         print("Tidak ada akun (folder sessions/ dan initdata/ kosong).")
         return
+    banner("🥔 MyAge auto-claim — putaran " +
+           time.strftime("%Y-%m-%d %H:%M:%S") +
+           f" — {len(labels)} akun")
+    results = []
     for i, label in enumerate(labels):
         if i:
             await asyncio.sleep(random.uniform(5, 12))
-        await process_account(label, args)
+        results.append(await process_account(label, args))
+    print_summary(results)
 
 
 def main():
