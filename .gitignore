@@ -1,0 +1,10 @@
+# Kunci login & data sesi — JANGAN PERNAH ikut ter-push
+sessions/
+initdata/
+inspect/
+runs.log
+
+# Python
+venv/
+__pycache__/
+*.pyc

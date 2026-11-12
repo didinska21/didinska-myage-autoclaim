@@ -1,0 +1,87 @@
+# MyAge Auto-Claim — Multi-Akun (VPS)
+
+Script Python untuk auto-claim My Age (@MyAgeApp) banyak akun sekaligus,
+jalan langsung di VPS — tanpa browser, tanpa klik UI.
+
+Per putaran, per akun, script mengerjakan persis jalur API resmi app-nya:
+
+1. Ambil **initData segar** dari WebView bot @MyAgeApp (lewat sesi Telegram akun itu sendiri)
+2. `POST session` — buka sesi, baca saldo awal
+3. Klaim: **Vault → Daily reward → Spin reguler → Name tag harian → Link bio harian**
+4. **Achievements** yang sudah terbuka & siap klaim
+5. **Tasks**: baca daftar task; task gabung channel publik dikerjakan (join), task bot dikerjakan (START), lalu klaim yang statusnya siap
+6. `POST session` lagi — baca saldo akhir + total AGE yang masuk putaran itu
+
+## Pagar (sudah keras di dalam kode)
+
+Endpoint di luar allowlist **tidak bisa** dipanggil script ini. Yang tidak
+pernah disentuh: reserve/bayar Pass (`pass/invoice`, `pass/mint`), kode promo,
+link X, withdraw, kasino, share/posting, connect wallet. Script tidak invite
+siapa pun dan tidak mengubah nama/bio — item tag/bio hanya *klaim hadiah*
+yang server verifikasi sendiri dari nama/bio yang sudah ada.
+
+## Pasang di VPS
+
+```bash
+cd myage-autoclaim
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Login akun (sekali per akun)
+
+```bash
+python3 login.py akun1   # ketik nomor HP + OTP di terminal VPS
+python3 login.py akun2
+python3 login.py akun3
+python3 login.py akun4
+python3 login.py akun5
+```
+
+Sesi tersimpan di `sessions/<label>.session` (chmod 600).
+**Folder `sessions/` = kunci login Telegram. Jangan dibagikan, jangan di-commit.**
+
+## Jalan
+
+```bash
+python3 myage_claim.py --once --inspect   # putaran pertama + dump struktur API ke inspect/
+python3 myage_claim.py --once             # satu putaran biasa
+python3 myage_claim.py --loop --interval 9000   # jalan terus, putaran tiap ±2,5 jam
+python3 myage_claim.py --accounts akun1,akun3   # batasi akun tertentu
+```
+
+Log tertulis di layar dan di `runs.log`. Mode alternatif: bila tidak mau
+pakai Telethon, taruh initData mentah per akun di `initdata/<label>.txt`
+(script otomatis memakainya bila file sesi tidak ada) — tapi initData bisa
+kadaluwarsa, mode sesi Telegram di atas yang awet.
+
+Jalan 24 jam via systemd (contoh):
+
+```ini
+[Unit]
+Description=MyAge auto-claim
+After=network-online.target
+
+[Service]
+WorkingDirectory=/root/myage-autoclaim
+ExecStart=/root/myage-autoclaim/venv/bin/python myage_claim.py --loop --interval 9000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Catatan penting
+
+- Script ini butuh VPS yang bisa konek **MTProto Telegram** secara normal.
+  VPS Potato **tidak bisa** (egress-nya me-reset handshake Telegram — sudah
+  diuji 12 Nov 2026), jadi login + jalan script dilakukan di VPS Bos sendiri.
+- API Telegram yang dipakai default adalah kredensial publik klien Telegram
+  Desktop (sama seperti pemakaian Telethon umumnya). Bisa diganti pakai
+  api_id/api_hash sendiri dari my.telegram.org lewat env
+  `MYAGE_API_ID` / `MYAGE_API_HASH`.
+- Otomasi multi-akun selalu ada risiko ditandai proyek sebagai farming saat
+  distribusi. Itu keputusan yang sudah diambil — script ini hanya alatnya.
+- Distribusi AGE mulai 20 Nov 2026 19:00 WIB; sesudah itu script boleh
+  dimatikan (`--loop` berhenti dengan Ctrl+C / stop service).
