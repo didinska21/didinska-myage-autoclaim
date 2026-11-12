@@ -3,6 +3,12 @@
 Script Python untuk auto-claim My Age (@MyAgeApp) banyak akun sekaligus,
 jalan langsung di VPS — tanpa browser, tanpa klik UI.
 
+> **v3 (13 Nov 2026):** mesin task mengikuti alur app persis — klik task →
+> aksi di Telegram (join channel / START bot / buka postingan + reaksi 👍) →
+> balik → claim, dengan satu kali percobaan ulang bila server menjawab
+> "belum selesai". Parser task toleran bentuk API (key/id, status string),
+> hasil tiap task tercatat, dan task ber-link luar Telegram dilewati.
+>
 > **v2 (13 Nov 2026):** total putaran kini dihitung dari hadiah klaim yang
 > benar-benar dibayar server (v1 salah membaca field `age` di respons
 > session — itu statistik lain, bukan saldo), hadiah dibedakan AGE vs GRAM

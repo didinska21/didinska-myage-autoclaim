@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v2)
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v3)
+
+Yang baru di v3:
+- Mesin TASK mengikuti alur app persis: klik task -> aksi di Telegram
+  (join channel / START bot / buka postingan + reaksi 👍) -> balik ->
+  claim. Parser task toleran (key/id, title/name, status string) dan
+  setiap task yang belum selesai dicoba + hasilnya dicatat per task.
 
 Cara kerja:
 - Per akun: buka sesi Telegram (Telethon, StringSession per label di
@@ -38,6 +44,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -325,27 +332,60 @@ def collect_achievement_keys(obj, out, depth=0):
             collect_achievement_keys(v, out, depth + 1)
 
 
-def collect_tasks(obj, out, depth=0):
-    if depth > 5:
+def _status_flags(d):
+    s = str(d.get("status") or d.get("state") or "").lower()
+    claimed = d.get("claimed", d.get("is_claimed"))
+    done = d.get("done", d.get("completed", d.get("is_done")))
+    ready = d.get("claimable", d.get("ready"))
+    if s in ("claimed", "done", "completed", "finished", "paid"):
+        claimed = True
+    if s in ("done", "completed"):
+        done = True
+    if s in ("ready", "claimable", "check", "claim"):
+        ready = True
+    return done, claimed, ready
+
+
+def parse_tasks(obj, out, seen, depth=0):
+    """Kumpulkan task dari JSON tasks (toleran bentuk: key/id, title/name,
+    link/url, status string atau boolean, bersarang di steps/group)."""
+    if depth > 8:
         return
     if isinstance(obj, dict):
         link = obj.get("link") or obj.get("url") or obj.get("href") or ""
-        typ = str(obj.get("type") or obj.get("kind") or "").lower()
-        done = obj.get("done", obj.get("completed", obj.get("is_done")))
-        key = obj.get("key") or obj.get("id")
-        ready = obj.get("claimable", obj.get("ready"))
-        claimed = obj.get("claimed", obj.get("is_claimed"))
-        if isinstance(link, str) and "t.me/" in link:
-            out.append({"link": link, "type": typ, "done": done,
-                        "key": key, "ready": ready, "claimed": claimed})
-        elif key and (ready is True or done is True) and claimed is not True:
-            out.append({"link": "", "type": typ, "done": done,
-                        "key": key, "ready": ready, "claimed": claimed})
+        key = obj.get("key") or obj.get("id") or obj.get("task_id") or \
+            obj.get("slug")
+        title = obj.get("title") or obj.get("name") or obj.get("text") or \
+            obj.get("label") or ""
+        if (isinstance(link, str) and link) or (key and title):
+            sig = (str(key), str(link), str(title))
+            if sig not in seen:
+                seen.add(sig)
+                done, claimed, ready = _status_flags(obj)
+                out.append({
+                    "key": key, "title": str(title)[:60],
+                    "link": link if isinstance(link, str) else "",
+                    "type": str(obj.get("type") or obj.get("kind") or
+                                obj.get("action") or "").lower(),
+                    "done": done, "claimed": claimed, "ready": ready})
         for v in obj.values():
-            collect_tasks(v, out, depth + 1)
+            parse_tasks(v, out, seen, depth + 1)
     elif isinstance(obj, list):
         for v in obj:
-            collect_tasks(v, out, depth + 1)
+            parse_tasks(v, out, seen, depth + 1)
+
+
+def task_kind(t):
+    if re.match(r"https?://t\.me/[^/]+/\d+", t["link"] or ""):
+        return "post"
+    typ, title = t["type"], t["title"].lower()
+    if "like" in typ or "react" in typ or "like" in title or \
+            "share" in title:
+        return "post"
+    if "bot" in typ or "register" in typ or "quest" in typ or \
+            "register" in title or "start" in title:
+        return "bot"
+    return "join"
 
 
 async def get_init_data(client):
@@ -368,28 +408,126 @@ async def get_init_data(client):
     return data
 
 
-async def tg_task_actions(client, label, tasks):
-    """Aksi Telegram gratis untuk task: join channel publik / START bot."""
+async def tg_action(client, label, t):
+    """Kerjakan aksi Telegram satu task (langkah 'klik task' di app):
+    join channel / START bot / buka postingan + reaksi. True bila dicoba."""
     from telethon.tl.functions.channels import JoinChannelRequest
-    for t in tasks:
-        if t["done"] is True or not t["link"]:
-            continue
-        name = t["link"].rstrip("/").split("t.me/")[-1].split("/")[0]
-        if not name or name.startswith("+"):
-            continue
+    link = t["link"]
+    kind = task_kind(t)
+    title = t["title"] or str(t["key"])
+    try:
+        if "+join" in link or "joinchat" in link or \
+                re.search(r"t\.me/\+", link):
+            from telethon.tl.functions.messages import \
+                ImportChatInviteRequest
+            h = link.rstrip("/").split("/")[-1].lstrip("+")
+            try:
+                await client(ImportChatInviteRequest(h))
+            except Exception as e:
+                if "already" not in type(e).__name__.lower():
+                    raise
+            log(label, f"  · task '{title}': join via invite")
+            return True
+        m = re.match(r"https?://t\.me/([^/?#]+)(?:/(\d+))?", link)
+        if not m:
+            return False
+        name, post_id = m.group(1), m.group(2)
+        entity = await client.get_input_entity(name)
+        if kind == "bot" and not post_id:
+            q = parse_qs(urlparse(link).query)
+            start = q.get("start", [None])[0] or \
+                q.get("startapp", [None])[0]
+            await client.send_message(
+                entity, f"/start {start}" if start else "/start")
+            log(label, f"  · task '{title}': START @{name}")
+            return True
         try:
-            if "join" in t["type"] or "subscri" in t["type"] or \
-               "channel" in t["type"]:
-                await client(JoinChannelRequest(
-                    await client.get_input_entity(name)))
-                log(label, f"  · task: join @{name}")
-            elif "bot" in t["type"] or "start" in t["type"] or \
-                    "register" in t["type"] or "quest" in t["type"]:
-                await client.send_message(name, "/start")
-                log(label, f"  · task: START @{name}")
-            await asyncio.sleep(random.uniform(1, 2.5))
+            await client(JoinChannelRequest(entity))
+            log(label, f"  · task '{title}': join @{name}")
         except Exception as e:
-            log(label, f"  · task @{name}: gagal ({type(e).__name__})")
+            if "already" not in type(e).__name__.lower():
+                log(label, f"  · task '{title}': join @{name} gagal "
+                           f"({type(e).__name__})")
+        if post_id:
+            try:
+                await client.get_messages(entity, ids=int(post_id))
+                try:
+                    await client.send_reaction(entity, int(post_id), "👍")
+                except Exception:
+                    from telethon.tl.functions.messages import \
+                        SendReactionRequest
+                    from telethon.tl.types import ReactionEmoji
+                    await client(SendReactionRequest(
+                        peer=entity, msg_id=int(post_id),
+                        reaction=[ReactionEmoji(emoticon="👍")]))
+                log(label, f"  · task '{title}': buka post + reaksi "
+                           f"👍 @{name}/{post_id}")
+            except Exception as e:
+                log(label, f"  · task '{title}': buka post gagal "
+                           f"({type(e).__name__})")
+        return True
+    except Exception as e:
+        log(label, f"  · task '{title}': aksi gagal ({type(e).__name__})")
+        return False
+
+
+async def handle_tasks(api, client, label, inspect):
+    """Alur task persis app: klik task -> aksi di Telegram -> balik ->
+    claim. Mengembalikan (age, gram) dari task yang berhasil diklaim."""
+    tot_age = tot_gram = 0.0
+    st, js = api.get("tasks")
+    if inspect:
+        dump(label, "tasks", js)
+    if st != 200:
+        log(label, f"  · tasks: GET status {st} — dilewati")
+        return tot_age, tot_gram
+    found, seen = [], set()
+    parse_tasks(js, found, seen)
+    open_tasks = [t for t in found
+                  if t["claimed"] is not True and t["done"] is not True]
+    log(label, f"  · tasks: {len(found)} ditemukan, "
+               f"{len(open_tasks)} belum selesai")
+    for t in open_tasks:
+        name = t["title"] or str(t["key"]) or t["link"]
+        if t["link"] and "t.me/" not in t["link"]:
+            log(label, f"  ⚠️ Task '{name}': link luar Telegram — dilewati")
+            continue
+        if client is not None and t["link"]:
+            if await tg_action(client, label, t):
+                await asyncio.sleep(random.uniform(2, 4))
+        if not t["key"]:
+            log(label, f"  · Task '{name}': tanpa key — tidak bisa "
+                       f"claim via API")
+            continue
+        for attempt in (1, 2):
+            st2, js2 = api.post("tasks", {"key": t["key"]})
+            if st2 == 404 and attempt == 1:
+                st2, js2 = api.post("tasks", {"id": t["key"]})
+            status, msg = classify(st2, js2)
+            if status == "ok":
+                a, g = parse_reward(js2)
+                if a:
+                    tot_age += a
+                if g:
+                    tot_gram += g
+                log(label, f"  ✅ Task '{name}'" +
+                    (f" +{fmt(a)} AGE" if a else "") +
+                    (f" +{fmt(g)} GRAM" if g else ""))
+                break
+            if status == "already":
+                log(label, f"  ⏭ Task '{name}': sudah diklaim")
+                break
+            hint = any(w in msg.lower() for w in
+                       ("not", "first", "open", "join", "subscri",
+                        "complete", "cannot"))
+            if attempt == 1 and client is not None and t["link"] and hint:
+                await tg_action(client, label, t)
+                await asyncio.sleep(random.uniform(2, 4))
+                continue
+            log(label, f"  {ICON[status]} Task '{name}': status {st2} "
+                       f"{msg[:70]}".rstrip())
+            break
+    return tot_age, tot_gram
 
 
 async def run_claims(label, api, client, inspect):
@@ -438,33 +576,9 @@ async def run_claims(label, api, client, inspect):
                 log(label, f"  {ICON[status]} Achievement {k}: "
                            f"{msg[:60]}")
 
-    st, tasks = api.get("tasks")
-    if inspect:
-        dump(label, "tasks", tasks)
-    if st == 200:
-        found = []
-        collect_tasks(tasks, found)
-        if client is not None and found:
-            await tg_task_actions(client, label, found)
-            st, tasks = api.get("tasks")
-            found = []
-            collect_tasks(tasks, found)
-        for t in found:
-            if t["key"] and t["ready"] is True and t["claimed"] is not True:
-                st2, js2 = api.post("tasks", {"key": t["key"]})
-                status, msg = classify(st2, js2)
-                if status == "ok":
-                    a, g = parse_reward(js2)
-                    if a:
-                        extra_age += a
-                    if g:
-                        extra_gram += g
-                    log(label, f"  ✅ Task {t['key']}" +
-                        (f" +{fmt(a)} AGE" if a else "") +
-                        (f" +{fmt(g)} GRAM" if g else ""))
-                else:
-                    log(label, f"  {ICON[status]} Task {t['key']}: "
-                               f"{msg[:60]}")
+    t_age, t_gram = await handle_tasks(api, client, label, inspect)
+    extra_age += t_age
+    extra_gram += t_gram
     if extra_age or extra_gram:
         res["items"]["Lain"] = ("ok", extra_age or None,
                                 extra_gram or None)
