@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v3)
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v4)
+
+Yang baru di v4:
+- KLAIM TASK pakai SPAM-CLAIM (aturan Bos 13 Nov, meneruskan aturan
+  spam-claim 12 Nov): setelah aksi task selesai, klaim ditekan berulang
+  sampai 10x sampai tembus — bug app membuat klaim sering tidak
+  merespons / error sesaat di percobaan awal padahal task sudah selesai.
+  Berhenti dini hanya bila sukses atau server menyatakan sudah diklaim.
+  Body {key} diganti {id} bila server balas 404 / 'No task'; aksi
+  Telegram diulang sekali di tengah spam (server kadang belum melihat
+  aksi kita — pola app: 'Open the link, then tap Claim again').
 
 Yang baru di v3:
 - Mesin TASK mengikuti alur app persis: klik task -> aksi di Telegram
@@ -67,6 +77,9 @@ ALLOWED_POST = {"session", "vault", "daily", "spin", "tag", "bio",
                 "achievements", "tasks"}
 ALLOWED_GET = {"achievements", "tasks", "pass", "friends", "wallet",
                "board", "league", "channels", "feed", "vault-info"}
+
+CLAIM_TRIES = 10           # spam-claim task: maks percobaan klaim (aturan Bos)
+CLAIM_DELAY = (1.0, 2.0)   # jeda antar percobaan klaim (detik, acak)
 
 
 def log(label, msg):
@@ -471,6 +484,45 @@ async def tg_action(client, label, t):
         return False
 
 
+async def claim_task(api, client, label, t):
+    """Klaim hadiah SATU task dengan SPAM-CLAIM (aturan Bos): tekan klaim
+    berulang sampai CLAIM_TRIES (10) kali sampai tembus — bug app membuat
+    klaim sering tidak merespons / error sesaat di percobaan awal padahal
+    aksi task sudah selesai. Berhenti dini hanya bila sukses atau server
+    menyatakan SUDAH diklaim. Bila server balas 404 / 'No task', bentuk
+    body diganti {key} -> {id} untuk sisa percobaan. Aksi Telegram
+    diulang sekali di tengah spam (percobaan ke-4) untuk kasus server
+    belum melihat aksi kita. -> (age, gram) yang berhasil diklaim."""
+    name = t["title"] or str(t["key"]) or t["link"]
+    body = {"key": t["key"]}
+    last_st, last_status, last_msg = 0, "error", ""
+    for attempt in range(1, CLAIM_TRIES + 1):
+        st2, js2 = api.post("tasks", body)
+        status, msg = classify(st2, js2)
+        if status == "ok":
+            a, g = parse_reward(js2)
+            log(label, f"  ✅ Task '{name}'" +
+                (f" +{fmt(a)} AGE" if a else "") +
+                (f" +{fmt(g)} GRAM" if g else "") +
+                (f" (klaim tembus percobaan ke-{attempt})"
+                 if attempt > 1 else ""))
+            return a or 0.0, g or 0.0
+        if status == "already":
+            log(label, f"  ⏭ Task '{name}': sudah diklaim")
+            return 0.0, 0.0
+        last_st, last_status, last_msg = st2, status, msg
+        if (st2 == 404 or "no task" in msg.lower()) and "id" not in body:
+            body = {"id": t["key"]}
+        if attempt == 4 and client is not None and t["link"]:
+            await tg_action(client, label, t)
+        if attempt < CLAIM_TRIES:
+            await asyncio.sleep(random.uniform(*CLAIM_DELAY))
+    log(label, f"  {ICON[last_status]} Task '{name}': klaim gagal "
+               f"{CLAIM_TRIES}x (terakhir status {last_st} "
+               f"{last_msg[:70]})".rstrip())
+    return 0.0, 0.0
+
+
 async def handle_tasks(api, client, label, inspect):
     """Alur task persis app: klik task -> aksi di Telegram -> balik ->
     claim. Mengembalikan (age, gram) dari task yang berhasil diklaim."""
@@ -499,34 +551,9 @@ async def handle_tasks(api, client, label, inspect):
             log(label, f"  · Task '{name}': tanpa key — tidak bisa "
                        f"claim via API")
             continue
-        for attempt in (1, 2):
-            st2, js2 = api.post("tasks", {"key": t["key"]})
-            if st2 == 404 and attempt == 1:
-                st2, js2 = api.post("tasks", {"id": t["key"]})
-            status, msg = classify(st2, js2)
-            if status == "ok":
-                a, g = parse_reward(js2)
-                if a:
-                    tot_age += a
-                if g:
-                    tot_gram += g
-                log(label, f"  ✅ Task '{name}'" +
-                    (f" +{fmt(a)} AGE" if a else "") +
-                    (f" +{fmt(g)} GRAM" if g else ""))
-                break
-            if status == "already":
-                log(label, f"  ⏭ Task '{name}': sudah diklaim")
-                break
-            hint = any(w in msg.lower() for w in
-                       ("not", "first", "open", "join", "subscri",
-                        "complete", "cannot"))
-            if attempt == 1 and client is not None and t["link"] and hint:
-                await tg_action(client, label, t)
-                await asyncio.sleep(random.uniform(2, 4))
-                continue
-            log(label, f"  {ICON[status]} Task '{name}': status {st2} "
-                       f"{msg[:70]}".rstrip())
-            break
+        a, g = await claim_task(api, client, label, t)
+        tot_age += a
+        tot_gram += g
     return tot_age, tot_gram
 
 
