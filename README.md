@@ -3,6 +3,20 @@
 Script Python untuk auto-claim My Age (@MyAgeApp) banyak akun sekaligus,
 jalan langsung di VPS — tanpa browser, tanpa klik UI.
 
+> **v5 (15 Nov 2026):** tiga lubang ditutup, dibedah dari bundle app versi
+> live + video pemakaian Bos. (1) **Mystery spin kini dimainkan** — stok
+> spin menunggu (`mystery.left` di state sesi) diputar via `POST mystery`;
+> hadiahnya GRAM atau Telegram Premium. (2) **Achievement tidak lolos
+> lagi** — deteksi siap-klaim kini persis logika app (`done && !claimed`);
+> sebelumnya script mencari flag yang tidak pernah dikirim server, jadi
+> achievement tuntas seperti Hoarder +2.500 tidak pernah terklaim.
+> (3) **Saldo terbaca lagi** — field AGE di state sesi adalah `points`;
+> spin kini dibaca dari slice pemenang sehingga hadiah GRAM tidak lagi
+> tercatat sebagai AGE.
+>
+> **v4 (13 Nov 2026):** klaim task pakai spam-claim sampai 10x sampai
+> tembus (bug klaim app), sesuai aturan Bos.
+>
 > **v3 (13 Nov 2026):** mesin task mengikuti alur app persis — klik task →
 > aksi di Telegram (join channel / START bot / buka postingan + reaksi 👍) →
 > balik → claim, dengan satu kali percobaan ulang bila server menjawab
@@ -21,9 +35,10 @@ Per putaran, per akun, script mengerjakan persis jalur API resmi app-nya:
 1. Ambil **initData segar** dari WebView bot @MyAgeApp (lewat sesi Telegram akun itu sendiri)
 2. `POST session` — buka sesi, baca saldo awal
 3. Klaim: **Vault → Daily reward → Spin reguler → Name tag harian → Link bio harian**
-4. **Achievements** yang sudah terbuka & siap klaim
-5. **Tasks**: baca daftar task; task gabung channel publik dikerjakan (join), task bot dikerjakan (START), lalu klaim yang statusnya siap
-6. `POST session` lagi — baca saldo akhir + total AGE yang masuk putaran itu
+4. **Achievements** yang sudah selesai (`done`) & belum diklaim
+5. **Tasks**: baca daftar task; task gabung channel publik dikerjakan (join), task bot dikerjakan (START), lalu klaim di-spam sampai 10x sampai tembus
+6. **Mystery spin**: stok spin menunggu dari state sesi diputar semua (hadiah GRAM / Telegram Premium)
+7. `POST session` lagi — baca saldo akhir + total AGE yang masuk putaran itu
 
 ## Pagar (sudah keras di dalam kode)
 

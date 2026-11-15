@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v4)
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v5)
+
+Yang baru di v5 (dari video Bos 15 Nov + bundle app versi live):
+- MYSTERY SPIN kini dimainkan: stok spin menunggu dibaca dari state
+  sesi (mystery.left) lalu diputar satu-satu via POST mystery {} —
+  hadiah PASTI GRAM atau Telegram Premium (respons kind+amount).
+  v1-v4 tidak menyentuhnya sama sekali, padahal spin-nya menumpuk
+  dari task tuntas & teman yang menuntaskan task.
+- ACHIEVEMENT tidak lagi lolos: deteksi siap-klaim kini persis logika
+  app — item.done && !item.claimed (field payload: key/done/claimed/
+  value/goal/reward). Script lama mencari flag claimable/ready yang
+  tidak pernah dikirim server, dan 'claimed' ikut jatuh ke 'done',
+  jadi achievement tuntas (mis. Hoarder vault 50x +2.500) tidak
+  pernah terklaim. Respons klaim achievement hanya membawa saldo
+  baru (points), jadi jumlah hadiah dibaca dari field reward payload.
+- SALDO terbaca lagi: field AGE di state sesi bernama `points`
+  (GRAM: `gram`/`gramBalance`) — find_balances kini mengenalnya,
+  saldo awal/akhir tidak lagi tampil '—'.
+- SPIN: hadiah dibaca dari slice pemenang (slices[slice] kind+amount),
+  bukan tebakan amount pertama — spin pembayar GRAM tidak lagi
+  tercatat sebagai AGE.
 
 Yang baru di v4:
 - KLAIM TASK pakai SPAM-CLAIM (aturan Bos 13 Nov, meneruskan aturan
@@ -22,7 +42,8 @@ Cara kerja:
   sessions/<label>.session), minta URL WebView resmi bot @MyAgeApp,
   ambil initData segar dari URL itu, lalu panggil API myageapp.xyz
   persis seperti app-nya: POST session -> vault -> daily -> spin ->
-  tag -> bio -> achievements -> tasks.
+  tag -> bio -> achievements -> tasks -> mystery (stok spin menunggu
+  dari state sesi, diputar terakhir).
 - Mode initdata: bila sessions/<label>.session tidak ada tapi
   initdata/<label>.txt ada, initData dibaca dari file itu (tanpa Telethon).
 - Pagar keras (allowlist): script TIDAK PERNAH menyentuh endpoint
@@ -73,8 +94,8 @@ INIT_DIR = os.path.join(HERE, "initdata")
 INSPECT_DIR = os.path.join(HERE, "inspect")
 LOG_PATH = os.path.join(HERE, "runs.log")
 
-ALLOWED_POST = {"session", "vault", "daily", "spin", "tag", "bio",
-                "achievements", "tasks"}
+ALLOWED_POST = {"session", "vault", "daily", "spin", "mystery", "tag",
+                "bio", "achievements", "tasks"}
 ALLOWED_GET = {"achievements", "tasks", "pass", "friends", "wallet",
                "board", "league", "channels", "feed", "vault-info"}
 
@@ -164,10 +185,12 @@ def parse_reward(js):
     amt = find_number(js, ("amount", "claimed", "reward", "earned",
                            "bonus", "value", "prize"))
     if amt is not None:
-        cur = find_string(js, ("currency", "unit", "token", "denom",
-                               "asset"))
+        cur = find_string(js, ("kind", "currency", "unit", "token",
+                               "denom", "asset"))
         if cur and "gram" in cur.lower():
             return None, amt
+        if cur and "premium" in cur.lower():
+            return None, None
         if cur and "age" in cur.lower():
             return amt, None
         # Tanpa label mata uang: tebak dari kunci telanjang yang ikut ada.
@@ -197,8 +220,9 @@ def classify(st, js):
     return "error", msg
 
 
-AGE_KEYS = ("age", "age_balance", "balance_age", "age_amount")
-GRAM_KEYS = ("gram", "gram_balance", "balance_gram", "gram_amount")
+AGE_KEYS = ("points", "age", "age_balance", "balance_age", "age_amount")
+GRAM_KEYS = ("gram", "grambalance", "gram_balance", "balance_gram",
+             "gram_amount")
 
 
 def find_balances(state):
@@ -208,6 +232,9 @@ def find_balances(state):
     (50 / 37,5 / 25 — bukan saldo). v2 mengumpulkan semua dict yang memuat
     kunci age DAN gram sekaligus, lalu memilih yang paling mungkin saldo:
     induk bernama balance/wallet diutamakan, lalu nilai age terbesar.
+    v5: nama field asli dari bundle app — saldo AGE = `points`,
+    GRAM = `gram` (respons klaim membawa saldo baru sebagai `points` /
+    `gramBalance`), induk `user` ikut diutamakan.
     Mengembalikan (age|None, gram|None).
     """
     cands = []
@@ -227,7 +254,8 @@ def find_balances(state):
                     gram = v
             if age is not None and gram is not None:
                 score = 0
-                if "balance" in parent or "wallet" in parent:
+                if "balance" in parent or "wallet" in parent or \
+                        "user" in parent:
                     score += 10
                 cands.append((score, age, gram))
             for k, v in obj.items():
@@ -299,6 +327,130 @@ class Api:
 ICON = {"ok": "✅", "already": "⏭", "warn": "⚠️", "error": "❌"}
 
 
+def wheel_reward(js):
+    """Hadiah roda (spin reguler / mystery) dari respons, bentuk persis
+    app: mystery -> {kind, amount, left}; spin -> {slices[], slice}.
+    kind 'gram' -> GRAM, 'premium' -> Telegram Premium (bukan mata
+    uang), selain itu AGE. -> (age, gram, premium_bulan); elemen None
+    bila tak terbaca.
+    """
+    if not isinstance(js, dict):
+        return None, None, 0
+    kind, amt = js.get("kind"), js.get("amount")
+    sl_i = js.get("slice")
+    if kind is None and isinstance(js.get("slices"), list) and \
+            isinstance(sl_i, int) and not isinstance(sl_i, bool):
+        sl = js["slices"]
+        if 0 <= sl_i < len(sl) and isinstance(sl[sl_i], dict):
+            kind = sl[sl_i].get("kind")
+            amt = sl[sl_i].get("amount")
+    if not _num(amt):
+        return None, None, 0
+    amt = float(amt)
+    if kind == "premium":
+        return None, None, amt
+    if kind == "gram":
+        return None, amt, 0
+    return amt, None, 0
+
+
+def do_wheel(api, label, path, note, res):
+    """Klaim roda (spin reguler): hadiah dari slice pemenang via
+    wheel_reward; fallback parse_reward generik."""
+    st, js = api.post(path, {})
+    status, msg = classify(st, js)
+    age = gram = None
+    if status == "ok":
+        age, gram, prem = wheel_reward(js)
+        if age is None and gram is None and not prem:
+            age, gram = parse_reward(js)
+        if prem:
+            log(label, f"  🎁 {note}: PREMIUM {fmt(prem)} bulan!")
+    res["items"][note] = (status, age, gram)
+    if age:
+        res["age"] += age
+    if gram:
+        res["gram"] += gram
+    if status == "ok":
+        parts = []
+        if age:
+            parts.append(f"+{fmt(age)} AGE")
+        if gram:
+            parts.append(f"+{fmt(gram)} GRAM")
+        log(label, f"  ✅ {note:<14} {' · '.join(parts) or 'OK'}")
+    elif status == "already":
+        log(label, f"  ⏭ {note:<14} sudah diambil hari ini")
+    elif status == "warn":
+        log(label, f"  ⚠️ {note:<14} {msg[:90]}")
+    else:
+        log(label, f"  ❌ {note:<14} status {st} {msg[:90]}".rstrip())
+    return st, js
+
+
+def mystery_left(state, depth=0):
+    """Stok mystery spin menunggu dari state sesi (S.mystery.left)."""
+    if depth > 6:
+        return None
+    if isinstance(state, dict):
+        m = state.get("mystery")
+        if isinstance(m, dict) and _num(m.get("left")):
+            return int(m["left"])
+        for v in state.values():
+            r = mystery_left(v, depth + 1)
+            if r is not None:
+                return r
+    elif isinstance(state, list):
+        for v in state:
+            r = mystery_left(v, depth + 1)
+            if r is not None:
+                return r
+    return None
+
+
+def do_mystery(api, label, state, res):
+    """Putar mystery spin yang menunggu (stok `left` dari state sesi).
+
+    Mystery spin adalah STOK — earned dari menuntaskan semua task dan
+    dari teman yang menuntaskan task — bukan timer. Tiap putaran POST
+    mystery {}; hadiah PASTI GRAM atau Telegram Premium (kind+amount
+    di respons). v1-v4 tidak menyentuhnya sama sekali.
+    -> jumlah spin yang berhasil diputar.
+    """
+    left = mystery_left(state)
+    if not left:
+        return 0
+    tot_a = tot_g = 0.0
+    spun = 0
+    for _ in range(min(left, 10)):
+        st, js = api.post("mystery", {})
+        status, msg = classify(st, js)
+        if status != "ok":
+            log(label, f"  {ICON[status]} Mystery spin: "
+                       f"{msg[:70]}".rstrip())
+            break
+        spun += 1
+        a, g, prem = wheel_reward(js)
+        if a is None and g is None and not prem:
+            a, g = parse_reward(js)
+        if a:
+            tot_a += a
+        if g:
+            tot_g += g
+        log(label, f"  ✅ Mystery spin" +
+            (f" +{fmt(a)} AGE" if a else "") +
+            (f" +{fmt(g)} GRAM" if g else "") +
+            (f" 🎁 PREMIUM {fmt(prem)} bulan!" if prem else ""))
+        nl = js.get("left") if isinstance(js, dict) else None
+        if _num(nl) and nl <= 0:
+            break
+        time.sleep(random.uniform(1, 2))
+    if spun:
+        res["items"]["Mystery"] = ("ok", tot_a or None, tot_g or None)
+        res["age"] += tot_a
+        res["gram"] += tot_g
+    return spun
+
+
 def do_claim(api, label, path, note, res):
     """Satu klaim sederhana; catat hasil ke res[note] dan ke total akun."""
     st, js = api.post(path, {})
@@ -328,16 +480,37 @@ def do_claim(api, label, path, note, res):
 
 
 def collect_achievement_keys(obj, out, depth=0):
-    if depth > 5:
+    """Kumpulkan achievement SIAP KLAIM -> out[key] = reward|None.
+
+    Logika persis app (bundle myageapp.xyz): tombol Claim muncul bila
+    item.done == true dan item.claimed != true; field per item
+    {key, done, claimed, value, goal, reward}. v1-v4 melewatkan ini:
+    script mencari flag claimable/ready yang tidak pernah dikirim
+    server, dan 'claimed' ikut jatuh ke field 'done' — achievement
+    tuntas seperti Hoarder (vault 50x, +2.500) tidak pernah terklaim.
+    Cadangan: flag siap lain, status string, atau progres capai goal.
+    """
+    if depth > 8:
         return
     if isinstance(obj, dict):
         key = obj.get("key") or obj.get("id")
-        claimed = obj.get("claimed", obj.get("done", obj.get("is_claimed")))
-        ready = obj.get("claimable", obj.get("ready",
-                        obj.get("unlocked", obj.get("achieved",
-                        obj.get("completed")))))
-        if isinstance(key, str) and claimed is not True and ready is True:
-            out.add(key)
+        if isinstance(key, str) and key:
+            claimed = obj.get("claimed", obj.get("is_claimed"))
+            if claimed is None and isinstance(obj.get("status"), str):
+                claimed = obj["status"].lower() in ("claimed", "paid")
+            ready = obj.get("done") == True or obj.get(
+                "claimable", obj.get("ready", obj.get(
+                    "unlocked", obj.get("achieved",
+                    obj.get("completed")))))
+            if not ready:
+                val = obj.get("value", obj.get("progress",
+                              obj.get("current")))
+                goal = obj.get("goal", obj.get("target", obj.get("max")))
+                if _num(val) and _num(goal) and goal > 0 and val >= goal:
+                    ready = True
+            if claimed is not True and ready:
+                rw = obj.get("reward")
+                out[key] = float(rw) if _num(rw) else None
         for v in obj.values():
             collect_achievement_keys(v, out, depth + 1)
     elif isinstance(obj, list):
@@ -573,9 +746,12 @@ async def run_claims(label, api, client, inspect):
     if age0 is not None or gram0 is not None:
         log(label, f"  saldo awal: AGE={fmt(age0)} GRAM={fmt(gram0)}")
 
-    for path, note in (("vault", "Vault"), ("daily", "Daily"),
-                       ("spin", "Spin"), ("tag", "Name tag"),
-                       ("bio", "Link bio")):
+    for path, note in (("vault", "Vault"), ("daily", "Daily")):
+        do_claim(api, label, path, note, res)
+        time.sleep(random.uniform(1, 2))
+    do_wheel(api, label, "spin", "Spin", res)
+    time.sleep(random.uniform(1, 2))
+    for path, note in (("tag", "Name tag"), ("bio", "Link bio")):
         do_claim(api, label, path, note, res)
         time.sleep(random.uniform(1, 2))
 
@@ -584,14 +760,18 @@ async def run_claims(label, api, client, inspect):
     if inspect:
         dump(label, "achievements", ach)
     if st == 200:
-        keys = set()
-        collect_achievement_keys(ach, keys)
-        for k in sorted(keys):
+        rewards = {}
+        collect_achievement_keys(ach, rewards)
+        for k in sorted(rewards):
             time.sleep(random.uniform(0.7, 1.5))
             st2, js2 = api.post("achievements", {"key": k})
             status, msg = classify(st2, js2)
             if status == "ok":
                 a, g = parse_reward(js2)
+                if not a and not g and rewards.get(k):
+                    # Respons klaim hanya membawa saldo baru (points);
+                    # jumlah hadiah = field reward di payload GET.
+                    a = rewards[k]
                 if a:
                     extra_age += a
                 if g:
@@ -614,6 +794,12 @@ async def run_claims(label, api, client, inspect):
 
     st, state2 = api.post("session", {})
     if st == 200:
+        # Mystery dibaca dari state segar SETELAH task: menuntaskan
+        # semua task di putaran ini bisa langsung memberi spin baru.
+        if do_mystery(api, label, state2, res):
+            st, state3 = api.post("session", {})
+            if st == 200:
+                state2 = state3
         age1, gram1 = find_balances(state2)
         log(label, f"  saldo akhir: AGE={fmt(age1)} GRAM={fmt(gram1)}")
     log(label, f"  Subtotal: +{fmt(res['age'])} AGE · "
@@ -700,7 +886,8 @@ def cell(item):
 def print_summary(results):
     if not results:
         return
-    cols = ["Vault", "Daily", "Spin", "Name tag", "Link bio", "Lain"]
+    cols = ["Vault", "Daily", "Spin", "Mystery", "Name tag", "Link bio",
+            "Lain"]
     hdr = (f"{'Akun':<8}{'User':<16}" +
            "".join(f"{c:>9}" for c in cols) +
            f"{'AGE':>10}{'GRAM':>9}")
