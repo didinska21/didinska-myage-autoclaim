@@ -3,6 +3,15 @@
 Script Python untuk auto-claim My Age (@MyAgeApp) banyak akun sekaligus,
 jalan langsung di VPS — tanpa browser, tanpa klik UI.
 
+> **v8 (18 Nov 2026, malam):** log live v7 membuktikan `{taskId}` benar
+> (klaim dibalas 200, "No task." hilang) — tapi v7 berhenti di 200
+> pertama, padahal itu baru **press terdaftar** (`paid=0`, saldo task
+> tidak bergerak sama sekali). Mekanisme app memang menghitung press
+> (`presses`/`pressesRequired`): Open = press pertama, Claim = press
+> berikutnya sampai server **membayar**. v8 menekan terus (maks 40x
+> rapat) sampai respons benar-benar membayar (`paid`/`gramPaid`/
+> spin/steps/`task.done`), bukan sampai 200 pertama.
+>
 > **v7 (18 Nov 2026, malam):** AKAR MASALAH "No task." ditemukan dari
 > bundle app live — klaim task yang benar adalah `POST tasks` dengan
 > body **`{taskId: <id>}`** (fungsi `pressQuest` di app), bukan `{key}`

@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v7)
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v8)
+
+Yang baru di v8 (dari log live v7 di VPS Bos, 18 Nov 23:14 WIB):
+- Format {taskId} TERBUKTI BENAR: klaim task akhirnya dibalas 200
+  (tidak ada lagi 'No task.'). TAPI v7 berhenti di 200 PERTAMA —
+  padahal 200 pertama itu baru PRESS TERDAFTAR (respons paid=0, task
+  belum done): saldo akun3 tidak bergerak sama sekali untuk task
+  (116.477 + 6 Vault = 116.483 persis) dan log '✅ Task' tampil tanpa
+  jumlah hadiah. Di app, press yang belum membayar memang tidak
+  menampilkan apa-apa — tombol Claim tetap ada dan user MENEKAN LAGI
+  (mekanisme presses/pressesRequired di bundle: Open = press sunyi
+  pertama, Claim = press berikutnya sampai server membayar).
+- claim_task kini TIDAK berhenti di 200 polos: terus menekan sampai
+  respons benar-benar MEMBAYAR (paid>0 / gramPaid>0 / spinsPaid>0 /
+  steps tuntas / task.done=true) atau server menyatakan 'Already
+  claimed' / 'Available again', maks 40 press jeda rapat 0,3–0,6 dtk.
+  Error toast ('Open the link, then tap Claim again') diabaikan dan
+  ditekan lagi — kecuali 'No task' yang kini menghentikan task itu
+  seketika (format sudah terbukti benar; 'No task' berarti id-nya
+  memang tidak dikenal server, menekan lagi percuma).
+- Efek samping v7 yang ikut hilang: karena 200 polos dihitung sukses,
+  multi-pass mengulang task yang sama sampai 4 pass (8 '✅' hampa).
+  Kini pass lanjut hanya bila ada pembayaran/penuntasan nyata.
 
 Yang baru di v7 (AKAR MASALAH 'No task.' DITEMUKAN, 18 Nov malam):
 - Format klaim task di script lama SALAH TOTAL sejak v1: script mengirim
@@ -140,8 +162,8 @@ ALLOWED_POST = {"session", "vault", "daily", "spin", "mystery", "tag",
 ALLOWED_GET = {"achievements", "tasks", "pass", "friends", "wallet",
                "board", "league", "channels", "feed", "vault-info"}
 
-CLAIM_TRIES = 30           # spam-claim task: maks percobaan klaim (v6, video Bos 18 Nov)
-CLAIM_DELAY = (0.4, 0.9)   # jeda antar percobaan klaim (detik, acak — rapat, seperti ditekan terus-terusan)
+CLAIM_TRIES = 40           # maks PRESS per task sampai MEMBAYAR (v8: press != retry — server menghitung press)
+CLAIM_DELAY = (0.3, 0.6)   # jeda antar press (detik, acak — rapat, seperti ditekan terus-terusan)
 TASK_PASSES = 4            # pass ulang GET tasks (instans EXTRA TASKS / task yang baru terbuka)
 
 
@@ -707,47 +729,82 @@ async def tg_action(client, label, t):
 
 
 async def claim_task(api, label, t):
-    """Klaim hadiah SATU task dengan SPAM-CLAIM SAJA (logika Bos + bundle
-    app, v7): aksi Telegram sudah dikerjakan SEKALI oleh pemanggil;
-    di sini yang ditekan berulang hanya tombol Claim-nya, persis app —
-    POST tasks {taskId: id} terus-terusan secara rapat sampai tembus.
-    Percobaan awal wajar dibalas 'Open the link, then tap Claim again'
-    (server belum melihat aksi kita / jumlah press belum cukup) — itu
-    BUKAN perintah mengulang aksi Telegram, cukup tekan Claim lagi.
-    Berhenti dini hanya bila sukses atau server menyatakan sudah
-    diklaim / tersedia lagi nanti. Hadiah dari field respons app:
-    `paid` (AGE) / `gramPaid` (GRAM); cadangan: parse_reward generik,
-    lalu field reward/gram payload task.
+    """PRESS tombol Claim SATU task sampai MEMBAYAR (logika Bos + bundle
+    app, v8): aksi Telegram sudah dikerjakan SEKALI oleh pemanggil;
+    di sini yang ditekan berulang hanya Claim-nya, persis app —
+    POST tasks {taskId: id} terus-terusan secara rapat.
+
+    Satu press BUKAN satu klaim: respons 200 dengan paid=0 dan task
+    belum done artinya press baru TERDAFTAR (di app tombol Claim tetap
+    tampil, tidak ada popup) — tekan lagi. Press berhenti hanya bila:
+    - respons MEMBAYAR: paid>0 / gramPaid>0 / spinsPaid>0 /
+      epicPaid>0 / steps tuntas / task.done=true -> 'ok';
+    - server bilang 'Already claimed' / 'Available again' -> 'already';
+    - server bilang 'No task' -> 'failed' seketika (id tidak dikenal;
+      format {taskId} sudah terbukti benar di v7, menekan percuma);
+    - CLAIM_TRIES (40) press habis -> 'failed'.
+    Error toast lain ('Open the link, then tap Claim again', dsb.)
+    diabaikan dan ditekan lagi — BUKAN perintah mengulang aksi
+    Telegram. Hadiah dari field respons app `paid` / `gramPaid`;
+    cadangan: parse_reward generik, lalu reward/gram payload task
+    (bila task done tanpa field paid).
     -> (age, gram, hasil) hasil: 'ok' | 'already' | 'failed'."""
     name = t["title"] or str(t["key"]) or t["link"]
     body = {"taskId": t["key"]}
-    last_st, last_status, last_msg = 0, "error", ""
+    last_st, last_msg = 0, ""
+    noted = False
     for attempt in range(1, CLAIM_TRIES + 1):
         st2, js2 = api.post("tasks", body)
-        status, msg = classify(st2, js2)
-        if status == "ok":
-            a = js2.get("paid") if isinstance(js2, dict) else None
-            g = js2.get("gramPaid") if isinstance(js2, dict) else None
-            a = float(a) if _num(a) else None
-            g = float(g) if _num(g) else None
-            if a is None and g is None:
-                a, g = parse_reward(js2)
-            if a is None and g is None:
-                a, g = t.get("reward"), t.get("gram")
-            log(label, f"  ✅ Task '{name}'" +
-                (f" +{fmt(a)} AGE" if a else "") +
-                (f" +{fmt(g)} GRAM" if g else "") +
-                (f" (klaim tembus percobaan ke-{attempt})"
-                 if attempt > 1 else ""))
-            return a or 0.0, g or 0.0, "ok"
-        if status == "already":
+        msg = resp_message(js2)
+        low = msg.lower()
+        if "already claimed" in low or "available again" in low:
             log(label, f"  ⏭ Task '{name}': sudah diklaim")
             return 0.0, 0.0, "already"
-        last_st, last_status, last_msg = st2, status, msg
+        if st2 == 200 and isinstance(js2, dict):
+            a = js2.get("paid")
+            g = js2.get("gramPaid")
+            a = float(a) if _num(a) else None
+            g = float(g) if _num(g) else None
+            spins = js2.get("spinsPaid")
+            epic = js2.get("epicPaid")
+            spin_paid = (_num(spins) and spins > 0) or \
+                (_num(epic) and epic > 0)
+            steps = js2.get("steps")
+            step_done = isinstance(steps, dict) and \
+                bool(steps.get("one") or steps.get("two"))
+            tobj = js2.get("task")
+            done_now = isinstance(tobj, dict) and \
+                tobj.get("done") is True
+            if (a and a > 0) or (g and g > 0) or spin_paid or \
+                    step_done or done_now:
+                if a is None and g is None:
+                    a, g = parse_reward(js2)
+                if a is None and g is None and done_now:
+                    a, g = t.get("reward"), t.get("gram")
+                log(label, f"  ✅ Task '{name}'" +
+                    (f" +{fmt(a)} AGE" if a else "") +
+                    (f" +{fmt(g)} GRAM" if g else "") +
+                    (f" +{fmt(spins)} spin bonus" if _num(spins)
+                     and spins else "") +
+                    (f" (tembus press ke-{attempt})"
+                     if attempt > 1 else ""))
+                return a or 0.0, g or 0.0, "ok"
+            # 200 polos: press terdaftar, belum membayar — tekan lagi.
+            if not noted:
+                log(label, f"  · Task '{name}': press terdaftar, "
+                           f"belum dibayar — lanjut menekan Claim")
+                noted = True
+            last_st, last_msg = st2, "press belum dibayar"
+        elif "no task" in low:
+            log(label, f"  ❌ Task '{name}': server 'No task.' — id "
+                       f"tidak dikenal, berhenti (press ke-{attempt})")
+            return 0.0, 0.0, "failed"
+        else:
+            last_st, last_msg = st2, msg
         if attempt < CLAIM_TRIES:
             await asyncio.sleep(random.uniform(*CLAIM_DELAY))
-    log(label, f"  {ICON[last_status]} Task '{name}': klaim gagal "
-               f"{CLAIM_TRIES}x (terakhir status {last_st} "
+    log(label, f"  ⚠️ Task '{name}': {CLAIM_TRIES} press tanpa "
+               f"pembayaran (terakhir status {last_st} "
                f"{last_msg[:70]})".rstrip())
     return 0.0, 0.0, "failed"
 
