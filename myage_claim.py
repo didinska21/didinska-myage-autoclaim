@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v5)
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v6)
+
+Yang baru di v6 (dari video Bos 18 Nov, task 'Like and share for new
+IMPORTANT post' +2.000):
+- SPAM-CLAIM DIPERKERAS persis video: di app, Bos menekan tombol Claim
+  TERUS-TERUSAN secara rapat sampai popup 'Task done +2,000' muncul —
+  percobaan awal hanya dibalas petunjuk 'Open the link, then tap Claim
+  again' dan tombol berkedip tanpa hasil. v4/v5 cuma 10x dengan jeda
+  1–2 dtk lalu menyerah, jadi task yang butuh tekanan lebih banyak
+  tercatat GAGAL padahal sebenarnya bisa tembus. Kini 30x dengan jeda
+  rapat 0,4–0,9 dtk; aksi Telegram (Open link) diulang pada percobaan
+  ke-5, 13, dan 21 di tengah spam.
+- TASK DIPROSES MULTI-PASS: sesudah satu task tuntas di video, task
+  yang SAMA muncul lagi di bagian EXTRA TASKS — mula-mula hanya tombol
+  Open, sesudah di-Open baru Claim muncul, lalu di-spam lagi sampai
+  tuntas untuk +2.000 kedua. v5 hanya membaca daftar task SATU kali
+  di awal (snapshot), jadi instans kedua / task yang baru terbuka
+  sesudah task lain tuntas tidak pernah tersentuh. Kini daftar task
+  di-GET ulang sampai 4 pass; pass lanjut hanya jalan bila pass
+  sebelumnya ada klaim yang tembus, dan berhenti bila tidak ada lagi
+  task terbuka.
 
 Yang baru di v5 (dari video Bos 15 Nov + bundle app versi live):
 - MYSTERY SPIN kini dimainkan: stok spin menunggu dibaca dari state
@@ -99,8 +119,9 @@ ALLOWED_POST = {"session", "vault", "daily", "spin", "mystery", "tag",
 ALLOWED_GET = {"achievements", "tasks", "pass", "friends", "wallet",
                "board", "league", "channels", "feed", "vault-info"}
 
-CLAIM_TRIES = 10           # spam-claim task: maks percobaan klaim (aturan Bos)
-CLAIM_DELAY = (1.0, 2.0)   # jeda antar percobaan klaim (detik, acak)
+CLAIM_TRIES = 30           # spam-claim task: maks percobaan klaim (v6, video Bos 18 Nov)
+CLAIM_DELAY = (0.4, 0.9)   # jeda antar percobaan klaim (detik, acak — rapat, seperti ditekan terus-terusan)
+TASK_PASSES = 4            # pass ulang GET tasks (instans EXTRA TASKS / task yang baru terbuka)
 
 
 def log(label, msg):
@@ -658,14 +679,17 @@ async def tg_action(client, label, t):
 
 
 async def claim_task(api, client, label, t):
-    """Klaim hadiah SATU task dengan SPAM-CLAIM (aturan Bos): tekan klaim
-    berulang sampai CLAIM_TRIES (10) kali sampai tembus — bug app membuat
-    klaim sering tidak merespons / error sesaat di percobaan awal padahal
-    aksi task sudah selesai. Berhenti dini hanya bila sukses atau server
-    menyatakan SUDAH diklaim. Bila server balas 404 / 'No task', bentuk
-    body diganti {key} -> {id} untuk sisa percobaan. Aksi Telegram
-    diulang sekali di tengah spam (percobaan ke-4) untuk kasus server
-    belum melihat aksi kita. -> (age, gram) yang berhasil diklaim."""
+    """Klaim hadiah SATU task dengan SPAM-CLAIM (aturan Bos, diperkeras
+    v6 persis video 18 Nov): tekan klaim TERUS-TERUSAN secara rapat
+    sampai CLAIM_TRIES (30) kali sampai tembus — di app, percobaan awal
+    hanya dibalas 'Open the link, then tap Claim again' dan klaim baru
+    tembus sesudah ditekan berkali-kali sampai popup 'Task done'.
+    Berhenti dini hanya bila sukses atau server menyatakan SUDAH
+    diklaim. Bila server balas 404 / 'No task', bentuk body diganti
+    {key} -> {id} untuk sisa percobaan. Aksi Telegram (Open link)
+    diulang di tengah spam pada percobaan ke-5, 13, dan 21 untuk kasus
+    server belum melihat aksi kita.
+    -> (age, gram, hasil) hasil: 'ok' | 'already' | 'failed'."""
     name = t["title"] or str(t["key"]) or t["link"]
     body = {"key": t["key"]}
     last_st, last_status, last_msg = 0, "error", ""
@@ -679,54 +703,73 @@ async def claim_task(api, client, label, t):
                 (f" +{fmt(g)} GRAM" if g else "") +
                 (f" (klaim tembus percobaan ke-{attempt})"
                  if attempt > 1 else ""))
-            return a or 0.0, g or 0.0
+            return a or 0.0, g or 0.0, "ok"
         if status == "already":
             log(label, f"  ⏭ Task '{name}': sudah diklaim")
-            return 0.0, 0.0
+            return 0.0, 0.0, "already"
         last_st, last_status, last_msg = st2, status, msg
         if (st2 == 404 or "no task" in msg.lower()) and "id" not in body:
             body = {"id": t["key"]}
-        if attempt == 4 and client is not None and t["link"]:
+        if attempt in (5, 13, 21) and client is not None and t["link"]:
             await tg_action(client, label, t)
         if attempt < CLAIM_TRIES:
             await asyncio.sleep(random.uniform(*CLAIM_DELAY))
     log(label, f"  {ICON[last_status]} Task '{name}': klaim gagal "
                f"{CLAIM_TRIES}x (terakhir status {last_st} "
                f"{last_msg[:70]})".rstrip())
-    return 0.0, 0.0
+    return 0.0, 0.0, "failed"
 
 
 async def handle_tasks(api, client, label, inspect):
     """Alur task persis app: klik task -> aksi di Telegram -> balik ->
-    claim. Mengembalikan (age, gram) dari task yang berhasil diklaim."""
+    spam claim. MULTI-PASS (v6, video Bos 18 Nov): daftar task di-GET
+    ulang tiap pass — sesudah task STEP tuntas, task yang sama bisa
+    muncul lagi sebagai EXTRA TASKS (mula-mula hanya Open, sesudah
+    di-Open baru bisa di-claim) dan task lain bisa baru terbuka.
+    Pass lanjut hanya jalan bila pass sebelumnya ada klaim tembus;
+    berhenti bila tidak ada task terbuka lagi atau satu pass penuh
+    tanpa klaim tembus. Mengembalikan (age, gram) total dari task."""
     tot_age = tot_gram = 0.0
-    st, js = api.get("tasks")
-    if inspect:
-        dump(label, "tasks", js)
-    if st != 200:
-        log(label, f"  · tasks: GET status {st} — dilewati")
-        return tot_age, tot_gram
-    found, seen = [], set()
-    parse_tasks(js, found, seen)
-    open_tasks = [t for t in found
-                  if t["claimed"] is not True and t["done"] is not True]
-    log(label, f"  · tasks: {len(found)} ditemukan, "
-               f"{len(open_tasks)} belum selesai")
-    for t in open_tasks:
-        name = t["title"] or str(t["key"]) or t["link"]
-        if t["link"] and "t.me/" not in t["link"]:
-            log(label, f"  ⚠️ Task '{name}': link luar Telegram — dilewati")
-            continue
-        if client is not None and t["link"]:
-            if await tg_action(client, label, t):
-                await asyncio.sleep(random.uniform(2, 4))
-        if not t["key"]:
-            log(label, f"  · Task '{name}': tanpa key — tidak bisa "
-                       f"claim via API")
-            continue
-        a, g = await claim_task(api, client, label, t)
-        tot_age += a
-        tot_gram += g
+    for pass_no in range(1, TASK_PASSES + 1):
+        st, js = api.get("tasks")
+        if inspect:
+            dump(label, "tasks" if pass_no == 1 else
+                 f"tasks_pass{pass_no}", js)
+        if st != 200:
+            log(label, f"  · tasks: GET status {st} — dilewati")
+            return tot_age, tot_gram
+        found, seen = [], set()
+        parse_tasks(js, found, seen)
+        open_tasks = [t for t in found
+                      if t["claimed"] is not True and
+                      t["done"] is not True]
+        log(label, f"  · tasks pass {pass_no}: {len(found)} ditemukan, "
+                   f"{len(open_tasks)} belum selesai")
+        if not open_tasks:
+            break
+        pass_ok = False
+        for t in open_tasks:
+            name = t["title"] or str(t["key"]) or t["link"]
+            if t["link"] and "t.me/" not in t["link"]:
+                log(label, f"  ⚠️ Task '{name}': link luar Telegram — "
+                           f"dilewati")
+                continue
+            if client is not None and t["link"]:
+                if await tg_action(client, label, t):
+                    await asyncio.sleep(random.uniform(2, 4))
+            if not t["key"]:
+                log(label, f"  · Task '{name}': tanpa key — tidak bisa "
+                           f"claim via API")
+                continue
+            a, g, hasil = await claim_task(api, client, label, t)
+            tot_age += a
+            tot_gram += g
+            if hasil == "ok":
+                pass_ok = True
+        if not pass_ok:
+            # Tidak ada klaim tembus di pass ini — mengulang daftar yang
+            # sama hanya akan mengulang kegagalan yang sama.
+            break
     return tot_age, tot_gram
 
 

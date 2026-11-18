@@ -3,6 +3,17 @@
 Script Python untuk auto-claim My Age (@MyAgeApp) banyak akun sekaligus,
 jalan langsung di VPS — tanpa browser, tanpa klik UI.
 
+> **v6 (18 Nov 2026):** dari video Bos soal task "Like and share for new
+> IMPORTANT post" (+2.000) yang sering gagal ke-claim. Di app, Claim
+> ditekan **terus-terusan secara rapat** sampai popup "Task done" muncul
+> (percobaan awal cuma dibalas "Open the link, then tap Claim again"),
+> lalu task yang sama muncul lagi di **EXTRA TASKS** — di-Open lagi,
+> di-spam Claim lagi, tuntas untuk +2.000 kedua. Script kini meniru
+> persis itu: spam-claim **30x jeda rapat 0,4–0,9 dtk** (aksi Open
+> diulang di percobaan ke-5/13/21) dan daftar task **di-GET ulang
+> multi-pass (maks 4)** supaya instans Extra Tasks / task yang baru
+> terbuka ikut terproses.
+>
 > **v5 (15 Nov 2026):** tiga lubang ditutup, dibedah dari bundle app versi
 > live + video pemakaian Bos. (1) **Mystery spin kini dimainkan** — stok
 > spin menunggu (`mystery.left` di state sesi) diputar via `POST mystery`;
@@ -36,7 +47,7 @@ Per putaran, per akun, script mengerjakan persis jalur API resmi app-nya:
 2. `POST session` — buka sesi, baca saldo awal
 3. Klaim: **Vault → Daily reward → Spin reguler → Name tag harian → Link bio harian**
 4. **Achievements** yang sudah selesai (`done`) & belum diklaim
-5. **Tasks**: baca daftar task; task gabung channel publik dikerjakan (join), task bot dikerjakan (START), lalu klaim di-spam sampai 10x sampai tembus
+5. **Tasks**: baca daftar task; task gabung channel publik dikerjakan (join), task bot dikerjakan (START), task postingan dibuka + reaksi, lalu klaim di-spam rapat sampai 30x sampai tembus; daftar di-GET ulang multi-pass untuk instans EXTRA TASKS
 6. **Mystery spin**: stok spin menunggu dari state sesi diputar semua (hadiah GRAM / Telegram Premium)
 7. `POST session` lagi — baca saldo akhir + total AGE yang masuk putaran itu
 
