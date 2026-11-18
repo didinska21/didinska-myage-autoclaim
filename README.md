@@ -3,6 +3,17 @@
 Script Python untuk auto-claim My Age (@MyAgeApp) banyak akun sekaligus,
 jalan langsung di VPS — tanpa browser, tanpa klik UI.
 
+> **v7 (18 Nov 2026, malam):** AKAR MASALAH "No task." ditemukan dari
+> bundle app live — klaim task yang benar adalah `POST tasks` dengan
+> body **`{taskId: <id>}`** (fungsi `pressQuest` di app), bukan `{key}`
+> / `{id}` seperti yang script kirim sejak v1; kedua bentuk lama itu
+> ditolak server 400 "No task." selamanya, jadi spam v4–v6 tidak akan
+> pernah tembus. Alur kini persis app + logika Bos: aksi Telegram
+> (join/buka post + reaksi) dikerjakan **sekali saja**, sesudah itu
+> yang di-spam hanya Claim (`{taskId}` 30x rapat) — notif "Open the
+> link, then tap Claim again" **bukan** perintah mengulang aksinya.
+> Hadiah dibaca dari field respons `paid` / `gramPaid`.
+>
 > **v6 (18 Nov 2026):** dari video Bos soal task "Like and share for new
 > IMPORTANT post" (+2.000) yang sering gagal ke-claim. Di app, Claim
 > ditekan **terus-terusan secara rapat** sampai popup "Task done" muncul
@@ -47,7 +58,7 @@ Per putaran, per akun, script mengerjakan persis jalur API resmi app-nya:
 2. `POST session` — buka sesi, baca saldo awal
 3. Klaim: **Vault → Daily reward → Spin reguler → Name tag harian → Link bio harian**
 4. **Achievements** yang sudah selesai (`done`) & belum diklaim
-5. **Tasks**: baca daftar task; task gabung channel publik dikerjakan (join), task bot dikerjakan (START), task postingan dibuka + reaksi, lalu klaim di-spam rapat sampai 30x sampai tembus; daftar di-GET ulang multi-pass untuk instans EXTRA TASKS
+5. **Tasks**: baca daftar task; aksi Telegram tiap task dikerjakan SEKALI (join channel / START bot / buka postingan + reaksi), lalu klaim `POST tasks {taskId}` di-spam rapat sampai 30x sampai tembus (aksi tidak diulang di tengah spam); daftar di-GET ulang multi-pass untuk instans EXTRA TASKS
 6. **Mystery spin**: stok spin menunggu dari state sesi diputar semua (hadiah GRAM / Telegram Premium)
 7. `POST session` lagi — baca saldo akhir + total AGE yang masuk putaran itu
 

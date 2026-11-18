@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v6)
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v7)
+
+Yang baru di v7 (AKAR MASALAH 'No task.' DITEMUKAN, 18 Nov malam):
+- Format klaim task di script lama SALAH TOTAL sejak v1: script mengirim
+  {key: ...} (lalu v4+ mengganti jadi {id: ...} bila server balas
+  'No task') — keduanya DITOLAK server dengan 400 'No task.' selamanya,
+  jadi spam sebanyak apa pun tidak akan pernah tembus. Bundle app live
+  (myageapp.xyz, dibedah ulang 18 Nov) membuktikan fungsi app-nya
+  sendiri, pressQuest, mengirim POST tasks dengan body
+  {taskId: t.id} — tidak ada bentuk lain untuk klaim biasa.
+- Alur app persis seperti logika Bos: aksi Telegram (Open/join/like)
+  dikerjakan SEKALI, sesudah itu yang ditekan berulang hanya tombol
+  Claim/Check (POST {taskId}) — app TIDAK PERNAH mengulang aksi
+  Telegram-nya di tengah spam. v6 melanggar ini (aksi diulang di
+  percobaan ke-5/13/21, tiap ulangan membuang ±8 detik) — dihapus.
+- Hadiah klaim task kini dibaca dari field respons yang benar menurut
+  bundle: `paid` (AGE) dan `gramPaid` (GRAM); respons juga membawa
+  `task` terbaru & `points` (saldo baru). Cadangan terakhir: field
+  `reward`/`gram` di payload task itu sendiri.
+- Parser task kini mengutamakan field `id` (identitas task di app)
+  di atas `key`, dan membaca `url` + `kind` sesuai nama field app.
 
 Yang baru di v6 (dari video Bos 18 Nov, task 'Like and share for new
 IMPORTANT post' +2.000):
@@ -10,7 +30,8 @@ IMPORTANT post' +2.000):
   1–2 dtk lalu menyerah, jadi task yang butuh tekanan lebih banyak
   tercatat GAGAL padahal sebenarnya bisa tembus. Kini 30x dengan jeda
   rapat 0,4–0,9 dtk; aksi Telegram (Open link) diulang pada percobaan
-  ke-5, 13, dan 21 di tengah spam.
+  ke-5, 13, dan 21 di tengah spam. (v7: pengulangan aksi itu DIHAPUS —
+  aksi cukup sekali, yang di-spam hanya Claim.)
 - TASK DIPROSES MULTI-PASS: sesudah satu task tuntas di video, task
   yang SAMA muncul lagi di bagian EXTRA TASKS — mula-mula hanya tombol
   Open, sesudah di-Open baru Claim muncul, lalu di-spam lagi sampai
@@ -230,7 +251,8 @@ def classify(st, js):
     low = msg.lower()
     if st == 200:
         return "ok", msg
-    if "already" in low or "taken today" in low or "paid today" in low:
+    if "already" in low or "taken today" in low or "paid today" in low \
+            or "available again" in low:
         return "already", msg
     if st == 429:
         return "already", msg or "sudah diambil hari ini"
@@ -560,8 +582,10 @@ def parse_tasks(obj, out, seen, depth=0):
         return
     if isinstance(obj, dict):
         link = obj.get("link") or obj.get("url") or obj.get("href") or ""
-        key = obj.get("key") or obj.get("id") or obj.get("task_id") or \
-            obj.get("slug")
+        # Identitas task di app adalah field `id` (klaim = {taskId: id});
+        # `key` hanya cadangan terakhir — v1-v6 keliru mengutamakan key.
+        key = obj.get("id") or obj.get("taskId") or obj.get("task_id") or \
+            obj.get("key") or obj.get("slug")
         title = obj.get("title") or obj.get("name") or obj.get("text") or \
             obj.get("label") or ""
         if (isinstance(link, str) and link) or (key and title):
@@ -569,11 +593,15 @@ def parse_tasks(obj, out, seen, depth=0):
             if sig not in seen:
                 seen.add(sig)
                 done, claimed, ready = _status_flags(obj)
+                rw = obj.get("reward")
+                gr = obj.get("gram")
                 out.append({
                     "key": key, "title": str(title)[:60],
                     "link": link if isinstance(link, str) else "",
-                    "type": str(obj.get("type") or obj.get("kind") or
+                    "type": str(obj.get("kind") or obj.get("type") or
                                 obj.get("action") or "").lower(),
+                    "reward": float(rw) if _num(rw) else None,
+                    "gram": float(gr) if _num(gr) else None,
                     "done": done, "claimed": claimed, "ready": ready})
         for v in obj.values():
             parse_tasks(v, out, seen, depth + 1)
@@ -678,26 +706,34 @@ async def tg_action(client, label, t):
         return False
 
 
-async def claim_task(api, client, label, t):
-    """Klaim hadiah SATU task dengan SPAM-CLAIM (aturan Bos, diperkeras
-    v6 persis video 18 Nov): tekan klaim TERUS-TERUSAN secara rapat
-    sampai CLAIM_TRIES (30) kali sampai tembus — di app, percobaan awal
-    hanya dibalas 'Open the link, then tap Claim again' dan klaim baru
-    tembus sesudah ditekan berkali-kali sampai popup 'Task done'.
-    Berhenti dini hanya bila sukses atau server menyatakan SUDAH
-    diklaim. Bila server balas 404 / 'No task', bentuk body diganti
-    {key} -> {id} untuk sisa percobaan. Aksi Telegram (Open link)
-    diulang di tengah spam pada percobaan ke-5, 13, dan 21 untuk kasus
-    server belum melihat aksi kita.
+async def claim_task(api, label, t):
+    """Klaim hadiah SATU task dengan SPAM-CLAIM SAJA (logika Bos + bundle
+    app, v7): aksi Telegram sudah dikerjakan SEKALI oleh pemanggil;
+    di sini yang ditekan berulang hanya tombol Claim-nya, persis app —
+    POST tasks {taskId: id} terus-terusan secara rapat sampai tembus.
+    Percobaan awal wajar dibalas 'Open the link, then tap Claim again'
+    (server belum melihat aksi kita / jumlah press belum cukup) — itu
+    BUKAN perintah mengulang aksi Telegram, cukup tekan Claim lagi.
+    Berhenti dini hanya bila sukses atau server menyatakan sudah
+    diklaim / tersedia lagi nanti. Hadiah dari field respons app:
+    `paid` (AGE) / `gramPaid` (GRAM); cadangan: parse_reward generik,
+    lalu field reward/gram payload task.
     -> (age, gram, hasil) hasil: 'ok' | 'already' | 'failed'."""
     name = t["title"] or str(t["key"]) or t["link"]
-    body = {"key": t["key"]}
+    body = {"taskId": t["key"]}
     last_st, last_status, last_msg = 0, "error", ""
     for attempt in range(1, CLAIM_TRIES + 1):
         st2, js2 = api.post("tasks", body)
         status, msg = classify(st2, js2)
         if status == "ok":
-            a, g = parse_reward(js2)
+            a = js2.get("paid") if isinstance(js2, dict) else None
+            g = js2.get("gramPaid") if isinstance(js2, dict) else None
+            a = float(a) if _num(a) else None
+            g = float(g) if _num(g) else None
+            if a is None and g is None:
+                a, g = parse_reward(js2)
+            if a is None and g is None:
+                a, g = t.get("reward"), t.get("gram")
             log(label, f"  ✅ Task '{name}'" +
                 (f" +{fmt(a)} AGE" if a else "") +
                 (f" +{fmt(g)} GRAM" if g else "") +
@@ -708,10 +744,6 @@ async def claim_task(api, client, label, t):
             log(label, f"  ⏭ Task '{name}': sudah diklaim")
             return 0.0, 0.0, "already"
         last_st, last_status, last_msg = st2, status, msg
-        if (st2 == 404 or "no task" in msg.lower()) and "id" not in body:
-            body = {"id": t["key"]}
-        if attempt in (5, 13, 21) and client is not None and t["link"]:
-            await tg_action(client, label, t)
         if attempt < CLAIM_TRIES:
             await asyncio.sleep(random.uniform(*CLAIM_DELAY))
     log(label, f"  {ICON[last_status]} Task '{name}': klaim gagal "
@@ -721,8 +753,9 @@ async def claim_task(api, client, label, t):
 
 
 async def handle_tasks(api, client, label, inspect):
-    """Alur task persis app: klik task -> aksi di Telegram -> balik ->
-    spam claim. MULTI-PASS (v6, video Bos 18 Nov): daftar task di-GET
+    """Alur task persis app: klik task -> aksi di Telegram SEKALI ->
+    balik -> spam claim saja (aksi TIDAK diulang di tengah spam).
+    MULTI-PASS (v6, video Bos 18 Nov): daftar task di-GET
     ulang tiap pass — sesudah task STEP tuntas, task yang sama bisa
     muncul lagi sebagai EXTRA TASKS (mula-mula hanya Open, sesudah
     di-Open baru bisa di-claim) dan task lain bisa baru terbuka.
@@ -761,7 +794,7 @@ async def handle_tasks(api, client, label, inspect):
                 log(label, f"  · Task '{name}': tanpa key — tidak bisa "
                            f"claim via API")
                 continue
-            a, g, hasil = await claim_task(api, client, label, t)
+            a, g, hasil = await claim_task(api, label, t)
             tot_age += a
             tot_gram += g
             if hasil == "ok":
