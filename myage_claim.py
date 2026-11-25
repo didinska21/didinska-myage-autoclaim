@@ -701,6 +701,9 @@ def do_tower(api, label, res, cfg):
                 pay = r.get("payout")
                 log(label, f"  🗼 Tower: TAKE lantai {r.get('floor')} "
                            f"+{fmt(pay)} AGE")
+                if r.get("layout"):
+                    # sampel pola RNG server (riset celah jangka panjang)
+                    log(label, f"  🗼 Tower layout: {r.get('layout')}")
                 return float(pay) if _num(pay) else 0.0
             slot = random.randrange(int(nslots))
             stx, jsx = api.post("tower", {"op": "pick",
@@ -719,11 +722,15 @@ def do_tower(api, label, res, cfg):
                 log(label, f"  💥 Tower: gelas retak di lantai "
                            f"{(run.get('floor') or 0) + 1} "
                            f"— stake {fmt(stake)} hangus")
+                if run.get("layout"):
+                    log(label, f"  🗼 Tower layout: {run.get('layout')}")
                 return 0.0
             else:  # top / cashed otomatis di lantai atas
                 pay = run.get("payout")
                 log(label, f"  🗼 Tower: selesai ({run.get('status')}) "
                            f"+{fmt(pay)} AGE")
+                if run.get("layout"):
+                    log(label, f"  🗼 Tower layout: {run.get('layout')}")
                 return float(pay) if _num(pay) else 0.0
         return 0.0
 
