@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v9.1)
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v9.2)
+
+v9.2 (25 Nov, hasil probe live Tower di akun2): start Tower kini
+menunggu pause server habis juga sebelum climb pertama + retry
+sekali bila kena 400 "Take a breath" (dulu: putaran Tower langsung
+gagal). Probe membuktikan server Tower rapat di 11 vektor uji —
+tidak ada celah yang bisa dimanfaatkan; strategi tetap sah biasa.
 
 v9.1 (25 Nov, aturan Bos 13:56 WIB): Time Tower HANYA akun alt.
 Akun utama @didinska (label akun1) diblokir keras di dua tempat
@@ -752,12 +758,21 @@ def do_tower(api, label, res, cfg):
             break
         pause = tw.get("pause") or {}
         wait_ms = pause.get("leftMs") or 0
-        if played and _num(wait_ms) and wait_ms > 0:
+        if _num(wait_ms) and wait_ms > 0:
+            # pause server berlaku juga sebelum climb PERTAMA putaran
+            # ini (temuan probe live 25 Nov: start saat pause = 400
+            # "Take a breath") — tunggu habis, jangan gagal putaran.
             time.sleep(min(wait_ms / 1000.0 + 1.5, 90))
         elif played:
             time.sleep(random.uniform(31, 34))  # jeda server ±30 dtk
         stx, jsx = api.post("tower", {"op": "start", "mode": mode,
                                       "stake": stake})
+        if stx != 200 and "breath" in resp_message(jsx).lower():
+            log(label, "  🗼 Tower: kena pause server — tunggu 32 dtk, "
+                       "coba start sekali lagi")
+            time.sleep(32)
+            stx, jsx = api.post("tower", {"op": "start", "mode": mode,
+                                          "stake": stake})
         if stx != 200:
             log(label, f"  ⚠️ Tower start: status {stx} "
                        f"{resp_message(jsx)[:70]} — berhenti")
