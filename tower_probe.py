@@ -113,8 +113,21 @@ async def get_api(label):
 
 async def main_async(args):
     label = args.accounts
+    # ATURAN BOS 25 Nov 13:56 WIB: akun utama @didinska (akun1) TIDAK
+    # BOLEH jadi bahan uji Tower — probe hanya untuk akun alt.
+    if label in mc.TOWER_BLOCKED_LABELS:
+        print("DITOLAK: akun1 adalah akun utama @didinska — probe "
+              "Tower hanya untuk akun alt (aturan Bos).", flush=True)
+        return
     api, client = await get_api(label)
     try:
+        if client is not None:
+            me = await client.get_me()
+            if ("@" + (me.username or "")).lower() in \
+                    mc.TOWER_BLOCKED_USERS:
+                print("DITOLAK: akun ini @didinska (akun utama) — "
+                      "probe Tower hanya untuk akun alt.", flush=True)
+                return
         # ── Fase 0: state mentah ──────────────────────────────
         st, js = api.get("tower")
         print(f"[0] GET tower status {st}", flush=True)

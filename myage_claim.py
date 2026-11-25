@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v9)
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v9.1)
+
+v9.1 (25 Nov, aturan Bos 13:56 WIB): Time Tower HANYA akun alt.
+Akun utama @didinska (label akun1) diblokir keras di dua tempat
+(process_account + do_tower) dan tower_probe menolaknya juga —
+alt dicurigai Bos tidak lolos audit listing sehingga AGE-nya jadi
+bahan uji coba; akun utama dijaga tetap bersih. Klaim gratis &
+Code Hunt tetap jalan untuk SEMUA akun termasuk utama.
 
 Yang baru di v9 (update app 24 Nov, dibedah dari bundle live
 571 KB pada 25 Nov atas perintah Bos — fokus update task baru,
@@ -204,6 +211,12 @@ TOWER_MODE = "normal"      # normal: 3 gelas/1 retak · risky: 2 gelas/1 retak
 TOWER_STAKE = 1000         # stake terkecil yang ditawarkan app
 TOWER_CASH_FLOOR = 2       # ambil kemenangan begitu lantai ini tercapai
 TOWER_MAX_CLIMBS = 3       # maks climb per akun per putaran script
+# ATURAN BOS 25 Nov 13:56 WIB: Tower HANYA untuk akun alt (uji coba —
+# alt dicurigai Bos tidak lolos audit listing, jadi AGE-nya memang
+# buat bahan tes). Akun utama @didinska TIDAK PERNAH menyentuh Tower,
+# dalam mode apa pun, supaya akun utamanya tetap bersih & aman.
+TOWER_BLOCKED_LABELS = {"akun1"}
+TOWER_BLOCKED_USERS = {"@didinska"}
 
 
 def log(label, msg):
@@ -648,6 +661,10 @@ def do_tower(api, label, res, cfg):
     cash-out begitu lantai target tercapai, hormati climbs.left,
     dayLeft, dan pause server. Berhenti pada error pertama.
     -> neto AGE putaran tower ini (bisa negatif: stake hangus)."""
+    if label in TOWER_BLOCKED_LABELS:
+        log(label, "  🗼 Tower: DIBLOKIR untuk akun utama "
+                   "(aturan Bos — Tower hanya akun alt)")
+        return 0.0
     st, js = api.get("tower")
     if st != 200:
         log(label, f"  🗼 Tower: GET status {st} — dilewati")
@@ -1243,7 +1260,11 @@ async def process_account(label, args):
             return res
         api = Api(init_data)
         tower_cfg = None
-        if not getattr(args, "no_tower", False):
+        if label in TOWER_BLOCKED_LABELS or \
+                (res.get("user") or "").lower() in TOWER_BLOCKED_USERS:
+            log(label, "  🗼 Tower dilewati: akun utama dilindungi "
+                       "(aturan Bos 25 Nov — Tower hanya akun alt)")
+        elif not getattr(args, "no_tower", False):
             tower_cfg = {
                 "mode": getattr(args, "tower_mode", TOWER_MODE),
                 "stake": getattr(args, "tower_stake", TOWER_STAKE),
