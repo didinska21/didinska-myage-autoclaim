@@ -3,6 +3,21 @@
 Script Python untuk auto-claim My Age (@MyAgeApp) banyak akun sekaligus,
 jalan langsung di VPS — tanpa browser, tanpa klik UI.
 
+> **v9 (25 Nov 2026):** update app 24.11 dibedah dari bundle live.
+> (1) **Code Hunt** — hourglass harian: script membaca `hunt.spots`
+> dari sesi, `POST code {spot}` untuk mengambil kode yang diterbitkan
+> server, lalu `POST code {code}` untuk menukarnya; kumpulkan semua
+> = 3 secret gifts. Kode tidak pernah ditebak. (2) **Time Tower** —
+> game stake AGE baru, dimainkan atas perintah Bos dengan pagar:
+> mode Normal, stake 1.000, cash-out lantai 2, maks 3 climb/akun/
+> putaran, hormati batas & jeda server; matikan dengan `--no-tower`,
+> atur dengan `--tower-mode/--tower-stake/--tower-cash-floor/
+> --tower-max`. Jujur angkanya: EV Tower −3% (Risky terbukti dari
+> mult-nya) — ini hiburan berisiko, bukan klaim gratis. Konteks:
+> distribusi + listing diundur server ke **18 Desember**.
+> Uji: py_compile lolos + simulasi Hunt 2/2 tertukar, Tower menang
+> (cash lantai 2, neto +3.546/3 climb) & kalah (−2.000/2 climb) lolos.
+>
 > **v8 (18 Nov 2026, malam):** log live v7 membuktikan `{taskId}` benar
 > (klaim dibalas 200, "No task." hilang) — tapi v7 berhenti di 200
 > pertama, padahal itu baru **press terdaftar** (`paid=0`, saldo task
@@ -69,7 +84,9 @@ Per putaran, per akun, script mengerjakan persis jalur API resmi app-nya:
 4. **Achievements** yang sudah selesai (`done`) & belum diklaim
 5. **Tasks**: baca daftar task; aksi Telegram tiap task dikerjakan SEKALI (join channel / START bot / buka postingan + reaksi), lalu klaim `POST tasks {taskId}` di-spam rapat sampai 30x sampai tembus (aksi tidak diulang di tengah spam); daftar di-GET ulang multi-pass untuk instans EXTRA TASKS
 6. **Mystery spin**: stok spin menunggu dari state sesi diputar semua (hadiah GRAM / Telegram Premium)
-7. `POST session` lagi — baca saldo akhir + total AGE yang masuk putaran itu
+7. **Code Hunt (v9)**: tiap spot di `hunt.spots` — `POST code {spot}` → `POST code {code}` (kode terbitan server, bukan tebakan)
+8. **Time Tower (v9, bisa dimatikan `--no-tower`)**: `GET tower` → climb dengan stake terkecil, pilih gelas acak, cash-out di lantai target, hormati `climbs.left`/`dayLeft`/`pause` server
+9. `POST session` lagi — baca saldo akhir + total AGE yang masuk putaran itu
 
 ## Pagar (sudah keras di dalam kode)
 

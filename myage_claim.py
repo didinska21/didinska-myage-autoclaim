@@ -1,5 +1,31 @@
 #!/usr/bin/env python3
-"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v8)
+"""MyAge (@MyAgeApp) — auto-claim multi-akun untuk VPS. (v9)
+
+Yang baru di v9 (update app 24 Nov, dibedah dari bundle live
+571 KB pada 25 Nov atas perintah Bos — fokus update task baru,
+risiko farm-audit diterima Bos apa adanya):
+- CODE HUNT (fitur 24.11, berjalan 7 hari): hourglass sembunyi di
+  beberapa layar app (state sesi membawa hunt.spots untuk pemain
+  itu). Alur resmi app: POST code {spot} -> server menerbitkan kode
+  untuk spot itu -> POST code {code} menukarnya (respons membawa
+  reward + hunt{found,total,all}); kumpulkan semua kode = 3 secret
+  gifts. Ini BUKAN menebak kode promo: script tidak pernah menebak,
+  tidak pernah mengirim kode selain yang baru diterbitkan server
+  untuk akun itu sendiri di putaran yang sama. Endpoint `code`
+  kini masuk allowlist HANYA untuk dua bentuk body itu.
+- TIME TOWER (game baru 24.11, atas perintah eksplisit Bos):
+  POST tower {op:start|pick|cash} + GET tower. Stake AGE asli
+  dari saldo (BUKAN klaim gratis): mode Normal (3 gelas, 1 retak)
+  / Risky (2 gelas, 1 retak), 8 lantai, maks 20 climb/24 jam,
+  jeda antar climb dari server (pause). Matematika Risky terbukti
+  dari bundle+video Bos: mult x1,94*2^(f-1) dengan peluang 0,5^f
+  -> EV datar -3% di semua lantai cash-out; game ini hiburan
+  berisiko, bukan sumber AGE. Pagar script: stake terkecil
+  (default 1.000), cash-out dini (default lantai 2), maks climb
+  per putaran (default 3), hormati climbs.left & dayLeft server,
+  berhenti pada error pertama. Matikan dengan --no-tower.
+- Konteks: distribusi + listing diundur server ke 18 Desember
+  (roadmap in-app 20.11); loop tetap jalan seperti sebelumnya.
 
 Yang baru di v8 (dari log live v7 di VPS Bos, 18 Nov 23:14 WIB):
 - Format {taskId} TERBUKTI BENAR: klaim task akhirnya dibalas 200
@@ -110,10 +136,16 @@ Cara kerja:
 - Mode initdata: bila sessions/<label>.session tidak ada tapi
   initdata/<label>.txt ada, initData dibaca dari file itu (tanpa Telethon).
 - Pagar keras (allowlist): script TIDAK PERNAH menyentuh endpoint
-  pass/invoice, pass/mint, code (promo), x/link, withdraw, casino,
-  share/*, usdt, vip, bingx. Tidak invite, tidak ubah nama/bio
-  (tag/bio di sini hanya klaim hadiah yang server verifikasi sendiri),
-  tidak connect wallet, tidak bayar/sign apa pun.
+  pass/invoice, pass/mint, x/link, withdraw, share/*, usdt, vip,
+  bingx. Endpoint `code` (v9) hanya untuk Code Hunt resmi: body
+  {spot} dari daftar server dan {code} yang diterbitkan server di
+  putaran yang sama — menebak/menukar kode promo di luar itu tetap
+  dilarang keras di dalam kode. Time Tower (v9) adalah satu-satunya
+  pengecualian berbayar, dan hanya atas perintah eksplisit Bos
+  25 Nov, dengan pagar stake/cash-out di atas. Tidak invite, tidak
+  ubah nama/bio (tag/bio di sini hanya klaim hadiah yang server
+  verifikasi sendiri), tidak connect wallet, tidak bayar/sign
+  apa pun di luar stake Tower itu.
 
 Yang baru di v2:
 - Total putaran dihitung dari HADIAH KLAIM yang benar-benar dibayar server
@@ -158,13 +190,20 @@ INSPECT_DIR = os.path.join(HERE, "inspect")
 LOG_PATH = os.path.join(HERE, "runs.log")
 
 ALLOWED_POST = {"session", "vault", "daily", "spin", "mystery", "tag",
-                "bio", "achievements", "tasks"}
+                "bio", "achievements", "tasks", "code", "tower"}
 ALLOWED_GET = {"achievements", "tasks", "pass", "friends", "wallet",
-               "board", "league", "channels", "feed", "vault-info"}
+               "board", "league", "channels", "feed", "vault-info",
+               "tower"}
 
 CLAIM_TRIES = 40           # maks PRESS per task sampai MEMBAYAR (v8: press != retry — server menghitung press)
 CLAIM_DELAY = (0.3, 0.6)   # jeda antar press (detik, acak — rapat, seperti ditekan terus-terusan)
 TASK_PASSES = 4            # pass ulang GET tasks (instans EXTRA TASKS / task yang baru terbuka)
+
+# Time Tower (v9) — pagar bawaan; semua bisa dioverride via CLI.
+TOWER_MODE = "normal"      # normal: 3 gelas/1 retak · risky: 2 gelas/1 retak
+TOWER_STAKE = 1000         # stake terkecil yang ditawarkan app
+TOWER_CASH_FLOOR = 2       # ambil kemenangan begitu lantai ini tercapai
+TOWER_MAX_CLIMBS = 3       # maks climb per akun per putaran script
 
 
 def log(label, msg):
@@ -516,6 +555,211 @@ def do_mystery(api, label, state, res):
     return spun
 
 
+def _unwrap(js):
+    """Respons API kadang terbungkus {data: {...}} — kembalikan isinya."""
+    if isinstance(js, dict) and isinstance(js.get("data"), dict):
+        return js["data"]
+    return js if isinstance(js, dict) else {}
+
+
+def find_hunt(state, depth=0):
+    """State hunt dari sesi: dict `hunt` berisi spots/found/total."""
+    if depth > 6:
+        return None
+    if isinstance(state, dict):
+        h = state.get("hunt")
+        if isinstance(h, dict) and ("spots" in h or "total" in h):
+            return h
+        for v in state.values():
+            r = find_hunt(v, depth + 1)
+            if r is not None:
+                return r
+    elif isinstance(state, list):
+        for v in state:
+            r = find_hunt(v, depth + 1)
+            if r is not None:
+                return r
+    return None
+
+
+def do_hunt(api, label, state, res):
+    """Code Hunt (v9): untuk tiap spot dari server — ambil kodenya,
+    lalu tukar. Kode TIDAK PERNAH ditebak: hanya kode yang diterbitkan
+    server untuk (akun, spot) itu di putaran ini yang dikirim balik.
+    -> jumlah kode yang berhasil ditukar."""
+    hunt = find_hunt(state)
+    if not hunt:
+        return 0
+    spots = hunt.get("spots") or []
+    found, total = hunt.get("found"), hunt.get("total")
+    if not spots:
+        if total:
+            log(label, f"  🏺 Code Hunt: {found}/{total} — tidak ada "
+                       f"hourglass menunggu saat ini")
+        return 0
+    log(label, f"  🏺 Code Hunt: {found}/{total} — {len(spots)} "
+               f"hourglass menunggu: {', '.join(map(str, spots))}")
+    done = 0
+    tot = 0.0
+    for spot in spots:
+        st, js = api.post("code", {"spot": spot})
+        if st != 200:
+            log(label, f"  ⚠️ Hunt {spot}: ambil kode status {st} "
+                       f"{resp_message(js)[:60]}")
+            continue
+        body = _unwrap(js)
+        code = body.get("code") or js.get("code")
+        if not code:
+            log(label, f"  ⚠️ Hunt {spot}: server tidak memberi kode")
+            continue
+        time.sleep(random.uniform(0.7, 1.5))
+        st2, js2 = api.post("code", {"code": str(code)})
+        status, msg = classify(st2, js2)
+        if status != "ok":
+            log(label, f"  {ICON[status]} Hunt {spot}: tukar gagal "
+                       f"{msg[:60]}")
+            continue
+        body2 = _unwrap(js2)
+        reward = body2.get("reward")
+        if not _num(reward):
+            reward = js2.get("reward") if isinstance(js2, dict) else None
+        hu = body2.get("hunt") or (js2.get("hunt")
+                                   if isinstance(js2, dict) else None)
+        done += 1
+        if _num(reward) and reward:
+            tot += float(reward)
+        log(label, f"  ✅ Hunt {spot}: kode tertukar" +
+            (f" +{fmt(reward)} AGE" if _num(reward) and reward else "") +
+            (f" — {hu.get('found')}/{hu.get('total')}"
+             f"{' SEMUA KETEMU! 3 secret gifts' if hu.get('all') else ''}"
+             if isinstance(hu, dict) else ""))
+        time.sleep(random.uniform(0.7, 1.5))
+    if done:
+        res["items"]["Hunt"] = ("ok", tot or None, None)
+        res["age"] += tot
+    return done
+
+
+def do_tower(api, label, res, cfg):
+    """Time Tower (v9, perintah Bos 25 Nov): main dengan pagar ketat.
+
+    cfg: {mode, stake, cash_floor, max_climbs}. Strategi: pilih gelas
+    ACAK (server yang menggambar retaknya — tidak ada pola di client),
+    cash-out begitu lantai target tercapai, hormati climbs.left,
+    dayLeft, dan pause server. Berhenti pada error pertama.
+    -> neto AGE putaran tower ini (bisa negatif: stake hangus)."""
+    st, js = api.get("tower")
+    if st != 200:
+        log(label, f"  🗼 Tower: GET status {st} — dilewati")
+        return 0.0
+    tw = _unwrap(js)
+    if tw.get("open") is False:
+        log(label, "  🗼 Tower: sedang tutup — dilewati")
+        return 0.0
+    mode = cfg["mode"]
+    stakes = [s for s in (tw.get("stakes") or []) if _num(s)]
+    stake = cfg["stake"]
+    if stakes and stake not in stakes:
+        stake = min(stakes)
+    slots_map = tw.get("slots") or {}
+    nslots = slots_map.get(mode) or (2 if mode == "risky" else 3)
+    climbs = tw.get("climbs") or {}
+    left_climbs = climbs.get("left")
+    day_left = tw.get("dayLeft")
+    net = 0.0
+    played = 0
+
+    def play_run(run):
+        """Selesaikan satu climb yang terbuka -> payout (0 bila kalah)."""
+        while isinstance(run, dict) and run.get("status") == "open":
+            floor = run.get("floor") or 0
+            if floor >= cfg["cash_floor"]:
+                stx, jsx = api.post("tower", {"op": "cash",
+                                              "id": run.get("id")})
+                if stx != 200:
+                    log(label, f"  ⚠️ Tower cash: status {stx} "
+                               f"{resp_message(jsx)[:60]}")
+                    return 0.0
+                r = _unwrap(jsx).get("run") or {}
+                pay = r.get("payout")
+                log(label, f"  🗼 Tower: TAKE lantai {r.get('floor')} "
+                           f"+{fmt(pay)} AGE")
+                return float(pay) if _num(pay) else 0.0
+            slot = random.randrange(int(nslots))
+            stx, jsx = api.post("tower", {"op": "pick",
+                                          "id": run.get("id"),
+                                          "floor": floor, "slot": slot})
+            if stx != 200:
+                log(label, f"  ⚠️ Tower pick: status {stx} "
+                           f"{resp_message(jsx)[:60]}")
+                return 0.0
+            run = _unwrap(jsx).get("run") or {}
+            if run.get("status") == "open":
+                log(label, f"  🗼 Tower: lantai "
+                           f"{run.get('floor')} lolos "
+                           f"(take {fmt(run.get('take'))})")
+            elif run.get("status") == "lost":
+                log(label, f"  💥 Tower: gelas retak di lantai "
+                           f"{(run.get('floor') or 0) + 1} "
+                           f"— stake {fmt(stake)} hangus")
+                return 0.0
+            else:  # top / cashed otomatis di lantai atas
+                pay = run.get("payout")
+                log(label, f"  🗼 Tower: selesai ({run.get('status')}) "
+                           f"+{fmt(pay)} AGE")
+                return float(pay) if _num(pay) else 0.0
+        return 0.0
+
+    run = tw.get("run")
+    if isinstance(run, dict) and run.get("status") == "open":
+        log(label, "  🗼 Tower: ada climb terbuka — diselesaikan dulu")
+        mode = run.get("mode") or mode
+        stake = run.get("stake") or stake
+        net += play_run(run) - float(stake)
+        played += 1
+
+    while played < cfg["max_climbs"]:
+        if _num(left_climbs) and left_climbs <= 0:
+            log(label, "  🗼 Tower: climb hari ini habis (batas server)")
+            break
+        if _num(day_left) and day_left < stake:
+            log(label, f"  🗼 Tower: sisa stake harian {fmt(day_left)} "
+                       f"< stake {fmt(stake)} — berhenti")
+            break
+        pause = tw.get("pause") or {}
+        wait_ms = pause.get("leftMs") or 0
+        if played and _num(wait_ms) and wait_ms > 0:
+            time.sleep(min(wait_ms / 1000.0 + 1.5, 90))
+        elif played:
+            time.sleep(random.uniform(31, 34))  # jeda server ±30 dtk
+        stx, jsx = api.post("tower", {"op": "start", "mode": mode,
+                                      "stake": stake})
+        if stx != 200:
+            log(label, f"  ⚠️ Tower start: status {stx} "
+                       f"{resp_message(jsx)[:70]} — berhenti")
+            break
+        body = _unwrap(jsx)
+        run = body.get("run") or {}
+        if isinstance(body.get("climbs"), dict):
+            left_climbs = body["climbs"].get("left", left_climbs)
+        if _num(day_left):
+            day_left -= stake
+        played += 1
+        net += play_run(run) - float(stake)
+        st2, js2 = api.get("tower")
+        if st2 == 200:
+            tw = _unwrap(js2)
+            if isinstance(tw.get("climbs"), dict):
+                left_climbs = tw["climbs"].get("left", left_climbs)
+            day_left = tw.get("dayLeft", day_left)
+    if played:
+        res["items"]["Tower"] = ("ok", net if net else None, None)
+        res["age"] += net
+        log(label, f"  🗼 Tower selesai: {played} climb, "
+                   f"neto {fmt(net)} AGE")
+    return net
+
+
 def do_claim(api, label, path, note, res):
     """Satu klaim sederhana; catat hasil ke res[note] dan ke total akun."""
     st, js = api.post(path, {})
@@ -863,7 +1107,7 @@ async def handle_tasks(api, client, label, inspect):
     return tot_age, tot_gram
 
 
-async def run_claims(label, api, client, inspect):
+async def run_claims(label, api, client, inspect, tower_cfg=None):
     res = {"label": label, "user": "", "items": {}, "age": 0.0,
            "gram": 0.0, "saldo_age": None, "saldo_gram": None,
            "skipped": ""}
@@ -925,11 +1169,22 @@ async def run_claims(label, api, client, inspect):
         res["age"] += extra_age
         res["gram"] += extra_gram
 
+    # Code Hunt (v9): spots dibaca dari state sesi AWAL putaran ini.
+    do_hunt(api, label, state, res)
+
     st, state2 = api.post("session", {})
     if st == 200:
         # Mystery dibaca dari state segar SETELAH task: menuntaskan
         # semua task di putaran ini bisa langsung memberi spin baru.
-        if do_mystery(api, label, state2, res):
+        spun = do_mystery(api, label, state2, res)
+        # Time Tower (v9): main sesudah semua klaim gratis beres,
+        # supaya stake tidak pernah memakan giliran klaim.
+        played_tower = False
+        if tower_cfg:
+            before = res["age"]
+            do_tower(api, label, res, tower_cfg)
+            played_tower = res["age"] != before or "Tower" in res["items"]
+        if spun or played_tower:
             st, state3 = api.post("session", {})
             if st == 200:
                 state2 = state3
@@ -987,7 +1242,16 @@ async def process_account(label, args):
             res["skipped"] = "belum login"
             return res
         api = Api(init_data)
-        r = await run_claims(label, api, client, args.inspect)
+        tower_cfg = None
+        if not getattr(args, "no_tower", False):
+            tower_cfg = {
+                "mode": getattr(args, "tower_mode", TOWER_MODE),
+                "stake": getattr(args, "tower_stake", TOWER_STAKE),
+                "cash_floor": getattr(args, "tower_cash_floor",
+                                       TOWER_CASH_FLOOR),
+                "max_climbs": getattr(args, "tower_max", TOWER_MAX_CLIMBS),
+            }
+        r = await run_claims(label, api, client, args.inspect, tower_cfg)
         r["user"] = res["user"]
         return r
     except Exception as e:
@@ -1009,7 +1273,7 @@ def cell(item):
     if status == "ok":
         parts = []
         if age:
-            parts.append(f"+{fmt(age)}")
+            parts.append(("" if age < 0 else "+") + fmt(age))
         if gram:
             parts.append(f"+{fmt(gram)}g")
         return " ".join(parts) or "OK"
@@ -1020,7 +1284,7 @@ def print_summary(results):
     if not results:
         return
     cols = ["Vault", "Daily", "Spin", "Mystery", "Name tag", "Link bio",
-            "Lain"]
+            "Hunt", "Tower", "Lain"]
     hdr = (f"{'Akun':<8}{'User':<16}" +
            "".join(f"{c:>9}" for c in cols) +
            f"{'AGE':>10}{'GRAM':>9}")
@@ -1090,6 +1354,20 @@ def main():
     ap.add_argument("--inspect", action="store_true",
                     help="dump JSON mentah session/tasks/achievements "
                          "ke folder inspect/")
+    ap.add_argument("--no-tower", action="store_true",
+                    help="jangan main Time Tower putaran ini")
+    ap.add_argument("--tower-mode", default=TOWER_MODE,
+                    choices=("normal", "risky"),
+                    help="mode Time Tower (default normal)")
+    ap.add_argument("--tower-stake", type=int, default=TOWER_STAKE,
+                    help="stake Time Tower per climb (default 1000)")
+    ap.add_argument("--tower-cash-floor", type=int,
+                    default=TOWER_CASH_FLOOR,
+                    help="cash-out Tower begitu lantai ini tercapai "
+                         "(default 2)")
+    ap.add_argument("--tower-max", type=int, default=TOWER_MAX_CLIMBS,
+                    help="maks climb Tower per akun per putaran "
+                         "(default 3)")
     args = ap.parse_args()
     while True:
         asyncio.run(one_round(args))
